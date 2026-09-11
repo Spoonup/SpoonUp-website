@@ -8,7 +8,9 @@ import {
   RotateCw, 
   MapPin,
   ShieldAlert,
-  ShieldCheck
+  ShieldCheck,
+  CreditCard,
+  Sparkles
 } from 'lucide-react';
 
 export default function OrderStatus({ 
@@ -94,10 +96,10 @@ export default function OrderStatus({
   }
 
   const steps = [
-    { key: 'pending', label: 'Received', desc: 'Queued', icon: Clock },
-    { key: 'preparing', label: 'Preparing', desc: 'Kitchen', icon: ChefHat },
-    { key: 'ready', label: 'Ready', desc: 'Counter', icon: Bell },
-    { key: 'completed', label: 'Collected', desc: 'Enjoy', icon: CheckCircle2 },
+    { key: 'pending', label: 'Payment', desc: 'Pay at Counter / UPI', icon: CreditCard },
+    { key: 'preparing', label: 'Preparing', desc: 'Kitchen Prepping', icon: ChefHat },
+    { key: 'ready', label: 'Ready', desc: 'Pickup at Main Shop', icon: Bell },
+    { key: 'completed', label: 'Collected', desc: 'Enjoy!', icon: CheckCircle2 },
   ];
 
   const getStepIndex = (st) => {
@@ -111,6 +113,8 @@ export default function OrderStatus({
   };
 
   const currentIndex = getStepIndex(order.status);
+  const isPending = order.status === 'pending';
+  const isPreparing = order.status === 'preparing';
   const isReady = order.status === 'ready';
   const isCompleted = order.status === 'completed';
 
@@ -162,7 +166,31 @@ export default function OrderStatus({
           </p>
         </div>
 
-        {/* Ready Notification Callout */}
+        {/* Status Callout Notices */}
+        {isPending && (
+          <div className="bg-[#fffdf5] border-b border-[#f0de99] p-4 text-center">
+            <div className="inline-flex items-center gap-1.5 text-[#013e37] font-bold text-xs sm:text-sm">
+              <CreditCard className="w-4 h-4 text-amber-700" />
+              <span>Awaiting Payment ({currencySymbol}{order.totalAmount})</span>
+            </div>
+            <p className="text-xs text-[#013e37]/80 mt-1 leading-relaxed">
+              Please complete payment of <strong className="font-bold">{currencySymbol}{order.totalAmount}</strong> at <strong>{order.counterName || 'Main Shop'}</strong> or via UPI. Staff will begin preparing your order once payment is confirmed.
+            </p>
+          </div>
+        )}
+
+        {isPreparing && (
+          <div className="bg-[#f0fdf4] border-b border-emerald-200 p-4 text-center">
+            <div className="inline-flex items-center gap-1.5 text-emerald-900 font-bold text-xs sm:text-sm">
+              <ChefHat className="w-4 h-4 text-emerald-700 animate-pulse" />
+              <span>Payment Confirmed • Kitchen Preparing</span>
+            </div>
+            <p className="text-xs text-emerald-800/80 mt-1">
+              Your order is being freshly prepared with care. We'll alert you the moment it's ready!
+            </p>
+          </div>
+        )}
+
         {isReady && (
           <div className="bg-[#fff9e6] border-b border-[#f0de99] p-4 text-center">
             <div className="inline-flex items-center gap-1.5 text-[#013e37] font-bold text-base">
@@ -170,8 +198,8 @@ export default function OrderStatus({
               <span>YOUR ORDER IS READY!</span>
             </div>
             <p className="text-xs text-[#013e37]/80 mt-1">
-              Please present Token <strong className="font-mono font-bold">#{order.orderNumber}</strong> at the{' '}
-              <strong>{order.counterName || 'Counter'}</strong> to collect your items.
+              Please present Token <strong className="font-mono font-bold">#{order.orderNumber}</strong> at{' '}
+              <strong>{order.counterName || 'Main Shop'}</strong> to collect your items.
             </p>
           </div>
         )}
@@ -222,7 +250,7 @@ export default function OrderStatus({
             </div>
             <div className="text-xs">
               <p className="font-bold text-[#013e37]">Pickup Location</p>
-              <p className="text-[#013e37]/70">{order.counterName || "Main Counter #1"}</p>
+              <p className="text-[#013e37]/70">{order.counterName || "Main Shop"}</p>
             </div>
           </div>
         </div>

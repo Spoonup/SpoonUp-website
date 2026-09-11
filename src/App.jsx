@@ -40,7 +40,7 @@ export default function App() {
   const [settings, setSettings] = useState({
     eventName: 'SpoonUp',
     currencySymbol: '₹',
-    counterName: 'Main Pickup Counter #1'
+    counterName: 'Main Shop'
   });
   const [cart, setCart] = useState([]);
   const [currentOrder, setCurrentOrder] = useState(null);

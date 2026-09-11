@@ -174,7 +174,7 @@ export default function CustomerMenu({
             </p>
             <div className="mt-4 inline-flex items-center gap-2 text-xs font-medium text-[#013e37] bg-white/60 px-3 py-1.5 rounded-xl border border-[#013e37]/10">
               <Clock size={14} />
-              <span>Collection: <strong className="font-bold">{settings.counterName || "Main Counter"}</strong></span>
+              <span>Pickup: <strong className="font-bold">{settings.counterName || "Main Shop"}</strong></span>
             </div>
           </div>
         </div>

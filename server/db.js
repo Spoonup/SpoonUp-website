@@ -25,7 +25,7 @@ const INITIAL_DATA = {
     eventName: "SpoonUp",
     currencySymbol: "₹",
     adminPin: process.env.ADMIN_PIN || "1234",
-    counterName: "Main Pickup Counter #1"
+    counterName: "Main Shop"
   },
   products: [
     {

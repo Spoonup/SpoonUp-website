@@ -38,10 +38,10 @@ CREATE TABLE IF NOT EXISTS orders (
 -- 4. Settings Table
 CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY DEFAULT 1,
-  event_name TEXT NOT NULL DEFAULT 'Event Food & Refreshments',
+  event_name TEXT NOT NULL DEFAULT 'SpoonUp',
   currency_symbol TEXT NOT NULL DEFAULT '₹',
   admin_pin TEXT NOT NULL DEFAULT '1234',
-  counter_name TEXT NOT NULL DEFAULT 'Main Pickup Counter #1',
+  counter_name TEXT NOT NULL DEFAULT 'Main Shop',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT single_settings_row CHECK (id = 1)
 );
@@ -56,7 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_products_available ON products(is_available);
 
 -- 6. Initial Seed Settings
 INSERT INTO settings (id, event_name, currency_symbol, admin_pin, counter_name)
-VALUES (1, 'Event Food & Refreshments', '₹', '1234', 'Main Pickup Counter #1')
+VALUES (1, 'SpoonUp', '₹', '1234', 'Main Shop')
 ON CONFLICT (id) DO NOTHING;
 
 -- 7. Initial Seed Menu Products

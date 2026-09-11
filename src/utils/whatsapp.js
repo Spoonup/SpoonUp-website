@@ -24,7 +24,7 @@ export const EMOJIS = {
  */
 export function buildOrderReadyWhatsAppMessage(order, settings = {}) {
   const currency = settings.currencySymbol || '₹';
-  const counter = order.counterName || settings.counterName || 'Main Pickup Counter';
+  const location = order.counterName || settings.counterName || 'Main Shop';
 
   const itemsList = (order.items || [])
     .map(item => `  • ${item.quantity}x ${item.name}`)
@@ -38,11 +38,11 @@ export function buildOrderReadyWhatsAppMessage(order, settings = {}) {
     `${EMOJIS.receipt} *Order #${order.orderNumber}*`,
     itemsList,
     ``,
-    `${EMOJIS.check} *Total:* ${currency}${order.totalAmount}`,
-    `${EMOJIS.pin} *Pickup Counter:* ${counter}`,
+    `${EMOJIS.check} *Total:* ${currency}${order.totalAmount} (Paid)`,
+    `${EMOJIS.pin} *Pickup:* ${location}`,
     ``,
     `_Real Food. Real Nutrition. Real Goodness._`,
-    `_Please show this message at the counter to collect your order. Enjoy!_ ${EMOJIS.sparkles}`
+    `_Please show this message at ${location} to collect your order. Enjoy!_ ${EMOJIS.sparkles}`
   ].join('\n');
 }
 

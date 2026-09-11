@@ -12,7 +12,10 @@ import {
   Check, 
   ExternalLink,
   DollarSign,
-  XCircle
+  XCircle,
+  CreditCard,
+  ShieldCheck,
+  AlertCircle
 } from 'lucide-react';
 import { playOrderChime } from '../utils/audio';
 import { openWhatsAppNotification, buildOrderReadyWhatsAppMessage } from '../utils/whatsapp';
@@ -112,15 +115,15 @@ export default function AdminOrders({ adminPin, settings }) {
       case 'pending':
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#ffefb3] text-[#013e37] border border-[#f0de99]">
-            <Clock size={12} />
-            <span>Pending</span>
+            <CreditCard size={12} className="text-[#013e37]" />
+            <span>Awaiting Payment</span>
           </span>
         );
       case 'preparing':
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#013e37]/10 text-[#013e37] border border-[#013e37]/20">
             <ChefHat size={12} />
-            <span>Preparing</span>
+            <span>Paid • Kitchen Prep</span>
           </span>
         );
       case 'ready':
@@ -175,29 +178,29 @@ export default function AdminOrders({ adminPin, settings }) {
         </div>
 
         <div className="bg-white p-4 rounded-2xl border border-[#e8e5dc]">
-          <span className="text-xs font-semibold text-[#013e37]/70">Active Orders</span>
+          <span className="text-xs font-semibold text-[#013e37]/70">Waiting for Payment</span>
           <p className="text-2xl font-black text-[#013e37] mt-1">
-            {(stats?.pendingCount || 0) + (stats?.preparingCount || 0)}
+            {stats?.pendingCount || 0}
           </p>
-          <span className="text-[10px] text-[#013e37]/50">
-            {stats?.pendingCount || 0} new, {stats?.preparingCount || 0} prepping
+          <span className="text-[10px] text-amber-700 font-medium">
+            Waiting List • Awaiting cash/UPI
           </span>
         </div>
 
         <div className="bg-white p-4 rounded-2xl border border-[#e8e5dc]">
-          <span className="text-xs font-semibold text-[#013e37]/70">Ready for Pickup</span>
+          <span className="text-xs font-semibold text-[#013e37]/70">Kitchen Prep (Paid)</span>
           <p className="text-2xl font-black text-[#013e37] mt-1">
-            {stats?.readyCount || 0}
+            {stats?.preparingCount || 0}
           </p>
-          <span className="text-[10px] text-[#013e37]/50">At pickup counter</span>
+          <span className="text-[10px] text-[#013e37]/50">Currently preparing</span>
         </div>
 
         <div className="bg-white p-4 rounded-2xl border border-[#e8e5dc]">
-          <span className="text-xs font-semibold text-[#013e37]/70">Completed</span>
+          <span className="text-xs font-semibold text-[#013e37]/70">Ready at Main Shop</span>
           <p className="text-2xl font-black text-[#013e37] mt-1">
-            {stats?.completedCount || 0}
+            {stats?.readyCount || 0}
           </p>
-          <span className="text-[10px] text-[#013e37]/50">Total orders: {stats?.totalOrders || 0}</span>
+          <span className="text-[10px] text-[#013e37]/50">Awaiting customer collection</span>
         </div>
       </div>
 
@@ -246,8 +249,8 @@ export default function AdminOrders({ adminPin, settings }) {
       <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
         {[
           { id: 'active', label: 'Active Queue', count: (stats?.pendingCount || 0) + (stats?.preparingCount || 0) },
-          { id: 'pending', label: 'Pending', count: stats?.pendingCount || 0 },
-          { id: 'preparing', label: 'Preparing', count: stats?.preparingCount || 0 },
+          { id: 'pending', label: 'Waiting List (Unpaid)', count: stats?.pendingCount || 0 },
+          { id: 'preparing', label: 'Kitchen Prep (Paid)', count: stats?.preparingCount || 0 },
           { id: 'ready', label: 'Ready for Pickup', count: stats?.readyCount || 0 },
           { id: 'completed', label: 'Completed', count: stats?.completedCount || 0 },
           { id: 'all', label: 'All Orders', count: stats?.totalOrders || 0 }
@@ -350,13 +353,26 @@ export default function AdminOrders({ adminPin, settings }) {
 
                   <div className="space-y-1.5 pt-1">
                     {isPending && (
-                      <button
-                        onClick={() => handleUpdateStatus(order.id, 'preparing')}
-                        className="w-full py-2 px-3 bg-[#013e37] hover:bg-[#06554c] text-[#ffefb3] text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer"
-                      >
-                        <ChefHat size={14} />
-                        <span>Start Preparing</span>
-                      </button>
+                      <div className="space-y-1.5">
+                        <button
+                          onClick={() => handleUpdateStatus(order.id, 'preparing')}
+                          className="w-full py-2 px-3 bg-[#013e37] hover:bg-[#06554c] text-[#ffefb3] text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                          title="Authorize received payment and send order to kitchen"
+                        >
+                          <CreditCard size={14} />
+                          <span>Confirm Payment & Start Prep</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (window.confirm(`Cancel unpaid order #${order.orderNumber}?`)) {
+                              handleUpdateStatus(order.id, 'cancelled');
+                            }
+                          }}
+                          className="w-full py-1 text-[11px] font-medium text-[#013e37]/50 hover:text-rose-600 transition cursor-pointer text-center"
+                        >
+                          Cancel Unpaid Order
+                        </button>
+                      </div>
                     )}
 
                     {isPreparing && (
@@ -407,7 +423,7 @@ export default function AdminOrders({ adminPin, settings }) {
                         </span>
                         <button
                           onClick={() => triggerWhatsAppMessage(order)}
-                          className="text-[11px] text-[#013e37] hover:underline flex items-center gap-1"
+                          className="text-[11px] text-[#013e37] hover:underline flex items-center gap-1 cursor-pointer"
                         >
                           <MessageCircle size={11} /> Re-send message
                         </button>

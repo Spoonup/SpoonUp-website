@@ -86,7 +86,8 @@ async function runTests() {
   // 6. Test WhatsApp Message Structure
   const waPhone = updated.customerPhone.replace(/\D/g, '');
   const itemsText = updated.items.map(i => `  • ${i.quantity}x ${i.name}`).join('\n');
-  const sampleMsg = `*SpoonUp* ✨ *Order Ready for Pickup!* 🟢\n\nHi *${updated.customerName}*, your order is freshly prepared and ready for pickup.\n\n🧾 *Order #${updated.orderNumber}*\n${itemsText}\n\n✅ *Total:* ₹${updated.totalAmount}\n📍 *Pickup Counter:* ${updated.counterName}\n\n_Real Food. Real Nutrition. Real Goodness._\n_Please show this message at the counter to collect your order. Enjoy!_ ✨`;
+  const location = updated.counterName || 'Main Shop';
+  const sampleMsg = `*SpoonUp* ✨ *Order Ready for Pickup!* 🟢\n\nHi *${updated.customerName}*, your order is freshly prepared and ready for pickup.\n\n🧾 *Order #${updated.orderNumber}*\n${itemsText}\n\n✅ *Total:* ₹${updated.totalAmount} (Paid)\n📍 *Pickup:* ${location}\n\n_Real Food. Real Nutrition. Real Goodness._\n_Please show this message at ${location} to collect your order. Enjoy!_ ✨`;
   const waUrl = `https://api.whatsapp.com/send?phone=${waPhone}&text=${encodeURIComponent(sampleMsg)}`;
   assert.ok(waUrl.includes('https://api.whatsapp.com/send?phone=919876543210'));
   console.log('   ✓ WhatsApp URL Generated cleanly with minimal emojis:\n     ', waUrl.slice(0, 80) + '...');

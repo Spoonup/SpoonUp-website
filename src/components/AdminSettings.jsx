@@ -109,7 +109,7 @@ export default function AdminSettings({ adminPin, settings, onRefreshSettings })
         <body>
           <div class="card">
             <h1>${eventName || 'Event Food & Refreshments'}</h1>
-            <div class="counter-badge">📍 ${counterName || 'Main Counter'}</div>
+            <div class="counter-badge">📍 ${counterName || 'Main Shop'}</div>
             <p><strong>Scan to view menu & order from your phone!</strong><br/>You will receive a WhatsApp ping when your order is ready.</p>
             <img src="${qrDataUrl}" alt="Scan QR code to order" />
             <p style="font-size: 12px; font-family: monospace; color: #013e37; opacity: 0.8;">${menuUrl}</p>
@@ -133,7 +133,7 @@ export default function AdminSettings({ adminPin, settings, onRefreshSettings })
         <div>
           <h3 className="text-base font-bold text-[#013e37] flex items-center gap-2">
             <Store size={18} />
-            <span>Event & Counter Configuration</span>
+            <span>Event & Shop Configuration</span>
           </h3>
           <p className="text-xs text-[#013e37]/70 mt-0.5">Customize stall branding and security PIN.</p>
         </div>
@@ -167,13 +167,13 @@ export default function AdminSettings({ adminPin, settings, onRefreshSettings })
 
           <div>
             <label className="block font-bold text-[#013e37] mb-1">
-              Pickup Counter Name
+              Shop / Pickup Location
             </label>
             <input
               type="text"
               value={counterName}
               onChange={(e) => setCounterName(e.target.value)}
-              placeholder="e.g. Counter #1 (Left Wing)"
+              placeholder="e.g. Main Shop"
               className="w-full px-3 py-2 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-xs text-[#013e37] focus:border-[#013e37] focus:outline-hidden"
             />
           </div>

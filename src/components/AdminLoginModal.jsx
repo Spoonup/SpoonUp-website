@@ -31,9 +31,8 @@ export default function AdminLoginModal({ isOpen, onClose, onLoginSuccess }) {
       }
 
       localStorage.setItem('admin_pin', pin.trim());
-      onLoginSuccess(pin.trim(), data.settings);
       setPin('');
-      onClose();
+      onLoginSuccess(pin.trim(), data.settings);
     } catch (err) {
       setError(err.message);
     } finally {

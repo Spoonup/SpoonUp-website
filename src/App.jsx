@@ -16,6 +16,24 @@ import AdminProducts from './components/AdminProducts';
 import AdminSettings from './components/AdminSettings';
 import AdminLoginModal from './components/AdminLoginModal';
 
+// Helper to determine view based on browser URL pathname
+const parseRoute = (pathname, loggedIn) => {
+  const clean = (pathname || '').toLowerCase().replace(/\/+$/, '') || '/';
+  if (clean === '/admin' || clean === '/wp-admin' || clean === '/dashboard' || clean === '/admin/orders') {
+    return { view: 'admin_orders', needsAuth: !loggedIn, path: '/admin/orders' };
+  }
+  if (clean === '/admin/products') {
+    return { view: 'admin_products', needsAuth: !loggedIn, path: '/admin/products' };
+  }
+  if (clean === '/admin/settings') {
+    return { view: 'admin_settings', needsAuth: !loggedIn, path: '/admin/settings' };
+  }
+  if (clean === '/status') {
+    return { view: 'status', needsAuth: false, path: '/status' };
+  }
+  return { view: 'menu', needsAuth: false, path: '/' };
+};
+
 export default function App() {
   const [view, setView] = useState('menu'); // 'menu' | 'status' | 'admin_orders' | 'admin_products' | 'admin_settings'
   const [products, setProducts] = useState([]);
@@ -55,10 +73,27 @@ export default function App() {
     }
   };
 
+  // Navigate and update browser URL
+  const navigateTo = (newView, customPath) => {
+    setView(newView);
+    let path = customPath;
+    if (!path) {
+      if (newView === 'menu') path = '/';
+      else if (newView === 'status') path = '/status';
+      else if (newView === 'admin_orders') path = '/admin/orders';
+      else if (newView === 'admin_products') path = '/admin/products';
+      else if (newView === 'admin_settings') path = '/admin/settings';
+    }
+    if (path && window.location.pathname !== path) {
+      window.history.pushState(null, '', path);
+    }
+  };
+
   useEffect(() => {
     loadData();
 
     const savedPin = localStorage.getItem('admin_pin');
+    const loggedIn = Boolean(savedPin);
     if (savedPin) {
       setAdminPin(savedPin);
       setIsAdminLoggedIn(true);
@@ -68,33 +103,64 @@ export default function App() {
     if (myOrders.length > 0) {
       setCurrentOrder(myOrders[0]);
     }
-  }, []);
 
-  const handleAdminClick = () => {
-    if (isAdminLoggedIn) {
-      setView('admin_orders');
-    } else {
+    // Handle initial URL route (e.g. user typed /wp-admin or /admin in address bar)
+    const initialRoute = parseRoute(window.location.pathname, loggedIn);
+    if (initialRoute.needsAuth) {
+      setView('menu');
       setIsLoginModalOpen(true);
+    } else {
+      setView(initialRoute.view);
     }
-  };
+
+    // Handle browser Back / Forward buttons
+    const handlePopState = () => {
+      const pin = localStorage.getItem('admin_pin');
+      const isAuth = Boolean(pin);
+      const route = parseRoute(window.location.pathname, isAuth);
+      if (route.needsAuth) {
+        setView('menu');
+        setIsLoginModalOpen(true);
+      } else {
+        setView(route.view);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   const handleLoginSuccess = (pin, newSettings) => {
     setAdminPin(pin);
     setIsAdminLoggedIn(true);
+    setIsLoginModalOpen(false);
     if (newSettings) setSettings(newSettings);
-    setView('admin_orders');
+    navigateTo('admin_orders', '/admin/orders');
+  };
+
+  const handleLoginModalClose = () => {
+    setIsLoginModalOpen(false);
+    // If user cancelled login modal without logging in, return URL to '/'
+    const savedPin = localStorage.getItem('admin_pin');
+    if (!savedPin && !isAdminLoggedIn) {
+      const clean = window.location.pathname.toLowerCase();
+      if (clean.includes('admin') || clean.includes('dashboard')) {
+        window.history.pushState(null, '', '/');
+        setView('menu');
+      }
+    }
   };
 
   const handleLogout = () => {
     localStorage.removeItem('admin_pin');
     setAdminPin('');
     setIsAdminLoggedIn(false);
-    setView('menu');
+    navigateTo('menu', '/');
   };
 
   const handleOrderPlaced = (newOrder) => {
     setCurrentOrder(newOrder);
-    setView('status');
+    navigateTo('status', '/status');
   };
 
   const isAdminView = view.startsWith('admin_');
@@ -106,7 +172,7 @@ export default function App() {
         <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
           {/* Brand Logo & Name */}
           <div 
-            onClick={() => setView('menu')}
+            onClick={() => navigateTo('menu', '/')}
             className="flex items-center gap-2.5 cursor-pointer group"
           >
             <img
@@ -125,9 +191,10 @@ export default function App() {
           <div className="flex items-center gap-2">
             {!isAdminView ? (
               <>
+                {/* Customer View: Only shows Active Order Tracker if customer has placed an order */}
                 {currentOrder && (
                   <button
-                    onClick={() => setView('status')}
+                    onClick={() => navigateTo('status', '/status')}
                     className={`px-3 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer border ${
                       view === 'status' 
                         ? 'bg-[#ffefb3] text-[#013e37] border-[#013e37]/20 font-bold' 
@@ -138,20 +205,12 @@ export default function App() {
                     <span>Order #{currentOrder.orderNumber}</span>
                   </button>
                 )}
-
-                <button
-                  onClick={handleAdminClick}
-                  className="px-3 py-1.5 rounded-full text-xs font-semibold bg-white hover:bg-[#ffefb3] text-[#013e37] transition flex items-center gap-1.5 cursor-pointer border border-[#e8e5dc]"
-                  title="Admin login"
-                >
-                  <Lock size={13} className="text-[#013e37]/70" />
-                  <span className="hidden sm:inline">Admin</span>
-                </button>
+                {/* Notice: Admin button is completely hidden from customer view */}
               </>
             ) : (
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setView('menu')}
+                  onClick={() => navigateTo('menu', '/')}
                   className="px-3 py-1.5 rounded-full text-xs font-semibold bg-[#ffefb3] hover:bg-[#ffefb3]/80 text-[#013e37] transition flex items-center gap-1.5 cursor-pointer border border-[#013e37]/20"
                 >
                   <ShoppingBag size={13} />
@@ -175,7 +234,7 @@ export default function App() {
           <div className="border-t border-[#e8e5dc] bg-[#f5f3eb] px-4 sm:px-6">
             <div className="max-w-5xl mx-auto flex items-center gap-2 overflow-x-auto py-2 no-scrollbar">
               <button
-                onClick={() => setView('admin_orders')}
+                onClick={() => navigateTo('admin_orders', '/admin/orders')}
                 className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
                   view === 'admin_orders'
                     ? 'bg-[#013e37] text-[#ffefb3]'
@@ -187,7 +246,7 @@ export default function App() {
               </button>
 
               <button
-                onClick={() => setView('admin_products')}
+                onClick={() => navigateTo('admin_products', '/admin/products')}
                 className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
                   view === 'admin_products'
                     ? 'bg-[#013e37] text-[#ffefb3]'
@@ -199,7 +258,7 @@ export default function App() {
               </button>
 
               <button
-                onClick={() => setView('admin_settings')}
+                onClick={() => navigateTo('admin_settings', '/admin/settings')}
                 className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
                   view === 'admin_settings'
                     ? 'bg-[#013e37] text-[#ffefb3]'
@@ -264,7 +323,7 @@ export default function App() {
       {/* Admin Login Modal */}
       <AdminLoginModal
         isOpen={isLoginModalOpen}
-        onClose={() => setIsLoginModalOpen(false)}
+        onClose={handleLoginModalClose}
         onLoginSuccess={handleLoginSuccess}
       />
     </div>

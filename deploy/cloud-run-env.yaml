@@ -1,0 +1,3 @@
+NODE_ENV: production
+TRUST_PROXY: "true"
+CORS_ORIGINS: "https://spoonupfoods.com,https://www.spoonupfoods.com"

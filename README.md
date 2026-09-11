@@ -64,11 +64,11 @@ Create a `.env` file in the project root:
 cp .env.example .env
 ```
 
-Edit `.env` with your Supabase credentials:
+Edit `.env` with a strong staff PIN (required before public use):
 
 ```ini
 PORT=5001
-ADMIN_PIN=1234
+ADMIN_PIN=change-this-before-going-live
 
 SUPABASE_URL=https://your-project-id.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-secret-key
@@ -83,15 +83,26 @@ When you start the server (`npm start`), you will see:
 
 ## 📲 How Attendees Order at the Event
 
-1. **Local Wi-Fi / Hotspot**:
+Pick the option that matches how you are hosting the app.
+
+1. **Laptop at the counter, same Wi-Fi / hotspot** (no ngrok needed):
    - Connect your laptop and attendee phones to the same Wi-Fi or hotspot.
    - Open **Admin Dashboard** ➔ **Settings & Standee**.
    - Enter your laptop's local IP (e.g. `http://192.168.1.15:5001`) and click **"Print Counter Standee Sign"**.
    - Display the printed standee at your counter. Attendees scan with their camera to order!
+   - Limitation: phones on mobile data cannot reach a private `192.168.x.x` address.
 
-2. **Over Mobile Data (4G/5G)**:
-   - Run `npx ngrok http 5001`.
+2. **Laptop at the counter, attendees on mobile data** (ngrok as a temporary tunnel):
+   - Run `npx ngrok http 5001` and set `TRUST_PROXY=true` in `.env` so rate limits see real client IPs.
    - Copy the public `https://...ngrok-free.app` URL into the standee settings and print.
+   - This is a stopgap for laptop hosting, **not** a deployment method: the URL changes on
+     every restart, the free tier is rate limited, and your laptop must stay awake and online.
+
+3. **Real deployment** (recommended for anything recurring — ngrok is not involved):
+   - Deploy to any Node host (Render, Railway, Fly.io, a VPS behind Nginx, etc.).
+   - Run `npm run build` then `npm start`, set `ADMIN_PIN` and the Supabase variables,
+     and set `TRUST_PROXY=true` because you are behind the platform's proxy.
+   - Terminate HTTPS at the platform/reverse proxy and point your own domain at it.
 
 ---
 

@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ override: false });
 
 import express from 'express';
 import cors from 'cors';
@@ -16,32 +16,109 @@ import {
   dbDeleteProduct,
   dbGetOrders,
   dbGetOrderById,
-  dbCreateOrder,
-  dbUpdateOrderStatus,
-  generateOrderAccessToken
+  dbUpdateOrder,
+  dbGetOrdersByUserId,
+  dbCreateUser,
+  dbGetUserByUsername,
+  dbGetUserByEmail,
+  dbCreateUserSession,
+  dbGetUserBySessionToken,
+  dbDeleteUserSession,
+  dbCreateCheckout,
+  dbGetCheckoutById,
+  dbUpdateCheckout,
+  publicUser
 } from './db.js';
 import { isSupabaseActive } from './supabase.js';
+import {
+  hashPassword,
+  verifyPassword,
+  timingSafeCompare,
+  createAdminSession,
+  isValidAdminSession,
+  sanitizeImageUrl,
+  sanitizeTrackingUrl,
+  csvCell,
+  isValidUsername,
+  isValidEmail
+} from './security.js';
+import {
+  isRazorpayConfigured,
+  getRazorpayKeyId,
+  createRazorpayOrder,
+  verifyRazorpaySignature
+} from './razorpay.js';
+import {
+  cleanPhoneNumber,
+  isValidPhone,
+  normalizeDeliveryAddress,
+  verifyCartItems,
+  cartNeedsDeliveryAddress,
+  createSplitOrders
+} from './checkout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5001;
+const isProduction = process.env.NODE_ENV === 'production';
+
+app.disable('x-powered-by');
+
+if (process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true') {
+  app.set('trust proxy', 1);
+}
 
 // ----------------- SECURITY HEADERS -----------------
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self' https://checkout.razorpay.com; connect-src 'self' https://api.razorpay.com https://lumberjack.razorpay.com https://checkout.razorpay.com; frame-src https://api.razorpay.com https://checkout.razorpay.com; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self' https://checkout.razorpay.com https://api.razorpay.com; frame-ancestors 'none'"
+  );
+  if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  }
   next();
 });
 
-app.use(cors());
-app.use(express.json({ limit: '5mb' }));
+const allowedOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      try {
+        if (new URL(origin).host === req.headers.host) {
+          return callback(null, true);
+        }
+      } catch {
+        // ignore malformed Origin
+      }
+      return callback(null, !isProduction);
+    }
+  })(req, res, next);
+});
+app.use(express.json({ limit: '64kb' }));
 
 // ----------------- RATE LIMITING (Layer 02) -----------------
 // Brute force protection on admin login: Max 5 attempts per 15 minutes per IP
+const userAuthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again after 15 minutes.' }
+});
+
 const adminLoginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -68,51 +145,41 @@ const generalLimiter = rateLimit({
 });
 app.use('/api', generalLimiter);
 
-// ----------------- CRYPTOGRAPHIC PASSWORD HASHING (Layer 03) -----------------
-/**
- * Hashes a password/PIN using cryptographic scrypt key derivation with a unique 16-byte salt.
- * Output format: "salt:derivedKeyHex"
- */
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derivedKey = crypto.scryptSync(password.trim(), salt, 64);
-  return `${salt}:${derivedKey.toString('hex')}`;
+function publicOrder(order) {
+  if (!order) return order;
+  const { accessToken: _accessToken, ...safe } = order;
+  return safe;
 }
 
-/**
- * Verifies a candidate password against a stored hash using timing-safe comparison.
- * Supports both modern scrypt salted hashes ("salt:key") and initial fallback hashes.
- */
-function verifyPassword(candidate, storedHash) {
-  if (typeof candidate !== 'string' || typeof storedHash !== 'string') return false;
-  const trimmedCandidate = candidate.trim();
-  const trimmedStored = storedHash.trim();
+function getUserCredential(req) {
+  const authHeader = req.headers.authorization;
+  const bearer = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  return req.headers['x-user-token'] || (bearer.startsWith('usr_') ? bearer : '');
+}
 
-  // 1. Salted scrypt verification
-  if (trimmedStored.includes(':')) {
-    const [salt, keyHex] = trimmedStored.split(':');
-    if (!salt || !keyHex) return false;
-    try {
-      const derivedKey = crypto.scryptSync(trimmedCandidate, salt, 64);
-      const keyBuffer = Buffer.from(keyHex, 'hex');
-      if (derivedKey.length !== keyBuffer.length) return false;
-      return crypto.timingSafeEqual(derivedKey, keyBuffer);
-    } catch {
-      return false;
-    }
+async function getUserFromRequest(req) {
+  const token = String(getUserCredential(req) || '').trim();
+  if (!token) return null;
+  try {
+    return await dbGetUserBySessionToken(token);
+  } catch {
+    return null;
   }
-
-  // 2. Timing-safe fallback for initial plain/SHA hashes
-  const hashInput = crypto.createHash('sha256').update(trimmedCandidate).digest();
-  const hashTarget = crypto.createHash('sha256').update(trimmedStored).digest();
-  return crypto.timingSafeEqual(hashInput, hashTarget);
 }
 
-function timingSafeCompare(input, target) {
-  if (typeof input !== 'string' || typeof target !== 'string') return false;
-  const hashInput = crypto.createHash('sha256').update(input.trim()).digest();
-  const hashTarget = crypto.createHash('sha256').update(target.trim()).digest();
-  return crypto.timingSafeEqual(hashInput, hashTarget);
+async function authenticateUser(req, res, next) {
+  const user = await getUserFromRequest(req);
+  if (!user) {
+    return res.status(401).json({ error: 'Please log in to continue.' });
+  }
+  req.user = user;
+  next();
+}
+
+function getAdminCredential(req) {
+  const authHeader = req.headers.authorization;
+  const bearer = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  return req.headers['x-admin-pin'] || bearer || '';
 }
 
 // Mask sensitive phone numbers for public customer receipt display
@@ -126,20 +193,23 @@ function maskPhoneNumber(phone) {
 // ----------------- AUTHENTICATION & AUTHORIZATION (Layer 05) -----------------
 // Middleware: Authenticate Admin via PIN / Token
 async function authenticateAdmin(req, res, next) {
-  const authHeader = req.headers.authorization;
-  const pin = req.headers['x-admin-pin'] || (authHeader && authHeader.replace('Bearer ', ''));
-  if (!pin) {
+  const credential = String(getAdminCredential(req) || '').trim();
+  if (!credential || credential.length > 128) {
     return res.status(401).json({ error: 'Unauthorized: Admin authentication required.' });
   }
 
   try {
-    const settings = await dbGetSettings();
-    const envPin = process.env.ADMIN_PIN || '1234';
-    if (verifyPassword(String(pin), String(settings.adminPin)) || verifyPassword(String(pin), String(envPin))) {
+    if (isValidAdminSession(credential)) {
       req.isAdmin = true;
       return next();
     }
-    // Generic error (Layer 04)
+    if (credential.length >= 4 && credential.length <= 32) {
+      const settings = await dbGetSettings();
+      if (verifyPassword(credential, String(settings.adminPin))) {
+        req.isAdmin = true;
+        return next();
+      }
+    }
     return res.status(401).json({ error: 'Unauthorized: Invalid credentials.' });
   } catch (err) {
     console.error('[Auth Error]', err);
@@ -147,15 +217,14 @@ async function authenticateAdmin(req, res, next) {
   }
 }
 
-// Check admin credentials without throwing
 async function checkIsAdmin(req) {
-  const authHeader = req.headers.authorization;
-  const pin = req.headers['x-admin-pin'] || (authHeader && authHeader.replace('Bearer ', ''));
-  if (!pin) return false;
+  const credential = String(getAdminCredential(req) || '').trim();
+  if (!credential || credential.length > 128) return false;
   try {
+    if (isValidAdminSession(credential)) return true;
+    if (credential.length < 4 || credential.length > 32) return false;
     const settings = await dbGetSettings();
-    const envPin = process.env.ADMIN_PIN || '1234';
-    return verifyPassword(String(pin), String(settings.adminPin)) || verifyPassword(String(pin), String(envPin));
+    return verifyPassword(credential, String(settings.adminPin));
   } catch {
     return false;
   }
@@ -165,15 +234,15 @@ async function checkIsAdmin(req) {
 app.get('/api/settings', async (req, res) => {
   try {
     const settings = await dbGetSettings();
-    const isAdmin = await checkIsAdmin(req);
 
+    // The stored PIN hash is never returned, not even to an authenticated admin.
     res.json({
       eventName: settings.eventName,
       currencySymbol: settings.currencySymbol,
       counterName: settings.counterName,
-      // Admin PIN is strictly hidden from regular customers (Layer 03/05)
-      ...(isAdmin ? { adminPin: settings.adminPin } : {}),
-      databaseType: isSupabaseActive() ? 'Supabase PostgreSQL' : 'Local SQLite/JSON'
+      databaseType: isSupabaseActive() ? 'Supabase PostgreSQL' : 'Local JSON',
+      razorpayEnabled: isRazorpayConfigured(),
+      razorpayKeyId: isRazorpayConfigured() ? getRazorpayKeyId() : ''
     });
   } catch (err) {
     console.error('[Settings API Error]', err);
@@ -184,26 +253,27 @@ app.get('/api/settings', async (req, res) => {
 // Admin Login (Layer 02 Rate Limited + Layer 03 Password Verified + Layer 04 Generic Errors)
 app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
   const { pin } = req.body;
-  if (!pin || typeof pin !== 'string' || pin.trim().length === 0) {
+  if (!pin || typeof pin !== 'string' || pin.trim().length < 4 || pin.trim().length > 32) {
     return res.status(400).json({ error: 'Please provide an admin PIN.' });
   }
 
   try {
     const settings = await dbGetSettings();
-    const envPin = process.env.ADMIN_PIN || '1234';
-    if (verifyPassword(pin, String(settings.adminPin)) || verifyPassword(pin, String(envPin))) {
+    if (verifyPassword(pin, String(settings.adminPin))) {
+      const sessionToken = createAdminSession();
       return res.json({
         success: true,
-        token: pin.trim(),
+        token: sessionToken,
         settings: {
           eventName: settings.eventName,
           currencySymbol: settings.currencySymbol,
           counterName: settings.counterName,
-          databaseType: isSupabaseActive() ? 'Supabase PostgreSQL' : 'Local SQLite/JSON'
+          databaseType: isSupabaseActive() ? 'Supabase PostgreSQL' : 'Local JSON',
+          razorpayEnabled: isRazorpayConfigured(),
+          razorpayKeyId: isRazorpayConfigured() ? getRazorpayKeyId() : ''
         }
       });
     }
-    // Layer 04: Generic error message to prevent enumeration
     return res.status(401).json({ error: 'Invalid credentials.' });
   } catch (err) {
     console.error('[Admin Login Error]', err);
@@ -246,7 +316,7 @@ app.get('/api/products', async (req, res) => {
 
 app.post('/api/products', authenticateAdmin, async (req, res) => {
   try {
-    const { name, category, price, description, imageUrl, isAvailable } = req.body;
+    const { name, category, price, description, imageUrl, isAvailable, deliverLater } = req.body;
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Valid product name is required.' });
     }
@@ -256,13 +326,14 @@ app.post('/api/products', authenticateAdmin, async (req, res) => {
     }
 
     const newProduct = {
-      id: `prod-${crypto.randomUUID().slice(0, 8)}`,
+      id: `prod-${crypto.randomUUID()}`,
       name: name.trim().slice(0, 80),
       category: category ? String(category).trim().slice(0, 40) : 'General',
       price: numPrice,
       description: description ? String(description).trim().slice(0, 300) : '',
-      imageUrl: imageUrl ? String(imageUrl).trim().slice(0, 500) : '',
+      imageUrl: sanitizeImageUrl(imageUrl),
       isAvailable: isAvailable !== false,
+      deliverLater: Boolean(deliverLater),
       createdAt: new Date().toISOString()
     };
 
@@ -277,7 +348,7 @@ app.post('/api/products', authenticateAdmin, async (req, res) => {
 app.put('/api/products/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, category, price, description, imageUrl, isAvailable } = req.body;
+    const { name, category, price, description, imageUrl, isAvailable, deliverLater } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = String(name).trim().slice(0, 80);
     if (category !== undefined) updates.category = String(category).trim().slice(0, 40);
@@ -288,8 +359,9 @@ app.put('/api/products/:id', authenticateAdmin, async (req, res) => {
       }
     }
     if (description !== undefined) updates.description = String(description).trim().slice(0, 300);
-    if (imageUrl !== undefined) updates.imageUrl = String(imageUrl).trim().slice(0, 500);
+    if (imageUrl !== undefined) updates.imageUrl = sanitizeImageUrl(imageUrl);
     if (isAvailable !== undefined) updates.isAvailable = Boolean(isAvailable);
+    if (deliverLater !== undefined) updates.deliverLater = Boolean(deliverLater);
 
     const updated = await dbUpdateProduct(id, updates);
     if (!updated) {
@@ -316,13 +388,244 @@ app.delete('/api/products/:id', authenticateAdmin, async (req, res) => {
   }
 });
 
+// ----------------- CUSTOMER AUTH -----------------
+app.post('/api/auth/signup', userAuthLimiter, async (req, res) => {
+  try {
+    const { username, password, email, phone } = req.body;
+    if (!isValidUsername(username)) {
+      return res.status(400).json({ error: 'Username must be 3-32 letters, numbers, or underscores.' });
+    }
+    if (!password || typeof password !== 'string' || password.length < 8 || password.length > 72) {
+      return res.status(400).json({ error: 'Password must be 8-72 characters.' });
+    }
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+    if (!isValidPhone(phone)) {
+      return res.status(400).json({ error: 'Please enter a valid phone number (8-18 digits).' });
+    }
+
+    const uname = String(username).trim();
+    const mail = String(email).trim().toLowerCase();
+    const { cleanPhone } = cleanPhoneNumber(phone);
+
+    if (await dbGetUserByUsername(uname)) {
+      return res.status(409).json({ error: 'That username is already taken.' });
+    }
+    if (await dbGetUserByEmail(mail)) {
+      return res.status(409).json({ error: 'That email is already registered.' });
+    }
+
+    const user = await dbCreateUser({
+      id: `user-${crypto.randomUUID()}`,
+      username: uname,
+      passwordHash: hashPassword(password),
+      email: mail,
+      phone: cleanPhone,
+      createdAt: new Date().toISOString()
+    });
+    const session = await dbCreateUserSession(user.id);
+    res.status(201).json({ success: true, token: session.token, user: publicUser(user) });
+  } catch (err) {
+    console.error('[Signup Error]', err);
+    res.status(500).json({ error: 'Could not create account.' });
+  }
+});
+
+app.post('/api/auth/login', userAuthLimiter, async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required.' });
+    }
+    const user = await dbGetUserByUsername(username);
+    if (!user || !verifyPassword(String(password), String(user.passwordHash))) {
+      return res.status(401).json({ error: 'Invalid credentials.' });
+    }
+    const session = await dbCreateUserSession(user.id);
+    res.json({ success: true, token: session.token, user: publicUser(user) });
+  } catch (err) {
+    console.error('[User Login Error]', err);
+    res.status(500).json({ error: 'Authentication service unavailable.' });
+  }
+});
+
+app.post('/api/auth/logout', async (req, res) => {
+  const token = String(getUserCredential(req) || '').trim();
+  if (token) await dbDeleteUserSession(token);
+  res.json({ success: true });
+});
+
+app.get('/api/auth/me', authenticateUser, async (req, res) => {
+  res.json({ user: publicUser(req.user) });
+});
+
+app.get('/api/me/orders', authenticateUser, async (req, res) => {
+  try {
+    const orders = await dbGetOrdersByUserId(req.user.id);
+    res.json(orders.map((order) => ({
+      ...publicOrder(order),
+      customerPhone: maskPhoneNumber(order.customerPhone)
+    })));
+  } catch (err) {
+    console.error('[My Orders Error]', err);
+    res.status(500).json({ error: 'Failed to retrieve your orders.' });
+  }
+});
+
+function checkoutCustomerFields(body, user) {
+  const nameFromUser = user?.username || '';
+  const customerName = String(body.customerName || nameFromUser || '').trim();
+  const phoneSource = body.customerPhone || user?.phone || '';
+  const { cleanPhone, digitsOnly } = cleanPhoneNumber(phoneSource);
+  return { customerName, cleanPhone, digitsOnly };
+}
+
+// ----------------- CHECKOUT & RAZORPAY -----------------
+app.post('/api/checkout/prepare', orderCreateLimiter, async (req, res) => {
+  try {
+    const user = await getUserFromRequest(req);
+    const { items, notes, paymentMethod } = req.body;
+    const method = paymentMethod === 'online' ? 'online' : 'counter';
+    const { customerName, cleanPhone, digitsOnly } = checkoutCustomerFields(req.body, user);
+
+    if (!customerName || customerName.length < 2 || customerName.length > 60) {
+      return res.status(400).json({ error: 'Please enter a valid name (2-60 characters).' });
+    }
+    if (!user && digitsOnly.length < 8) {
+      return res.status(400).json({ error: 'Phone number is required for guest checkout.' });
+    }
+    if (digitsOnly.length < 8 || digitsOnly.length > 18) {
+      return res.status(400).json({ error: 'Please enter a valid phone number (8-18 digits).' });
+    }
+    if (method === 'online' && !isRazorpayConfigured()) {
+      return res.status(503).json({ error: 'Online payments are not configured yet. Please pay at the counter.' });
+    }
+
+    const { verifiedItems, calculatedTotal } = await verifyCartItems(items);
+    const needsDeliveryAddress = cartNeedsDeliveryAddress(verifiedItems);
+    const checkoutId = `chk-${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    let razorpayOrderId = '';
+
+    if (method === 'online') {
+      const rzp = await createRazorpayOrder({
+        amountPaise: Math.round(calculatedTotal * 100),
+        receipt: checkoutId.replace(/-/g, '').slice(0, 40),
+        notes: { checkoutId }
+      });
+      razorpayOrderId = rzp.id;
+    }
+
+    await dbCreateCheckout({
+      id: checkoutId,
+      userId: user?.id || null,
+      customerName: customerName.slice(0, 60),
+      customerPhone: cleanPhone,
+      items: verifiedItems,
+      notes: notes ? String(notes).trim().slice(0, 250) : '',
+      paymentMethod: method,
+      amount: calculatedTotal,
+      status: 'open',
+      razorpayOrderId,
+      razorpayPaymentId: '',
+      deliveryAddress: null,
+      createdOrders: [],
+      createdAt: now,
+      updatedAt: now
+    });
+
+    res.json({
+      checkoutId,
+      amount: calculatedTotal,
+      paymentMethod: method,
+      needsDeliveryAddress,
+      razorpayKeyId: method === 'online' ? getRazorpayKeyId() : '',
+      razorpayOrderId
+    });
+  } catch (err) {
+    console.error('[Checkout Prepare Error]', err);
+    res.status(err.status || 500).json({ error: err.message || 'Could not start checkout.' });
+  }
+});
+
+app.post('/api/checkout/complete', orderCreateLimiter, async (req, res) => {
+  try {
+    const user = await getUserFromRequest(req);
+    const {
+      checkoutId,
+      deliveryAddress,
+      razorpayPaymentId,
+      razorpayOrderId,
+      razorpaySignature
+    } = req.body;
+
+    const checkout = await dbGetCheckoutById(String(checkoutId || '').trim());
+    if (!checkout || checkout.status === 'cancelled') {
+      return res.status(404).json({ error: 'Checkout session not found.' });
+    }
+    if (checkout.status === 'completed' && Array.isArray(checkout.createdOrders) && checkout.createdOrders.length) {
+      return res.json({ orders: checkout.createdOrders, alreadyCompleted: true });
+    }
+
+    const address = cartNeedsDeliveryAddress(checkout.items)
+      ? normalizeDeliveryAddress(deliveryAddress)
+      : null;
+    if (cartNeedsDeliveryAddress(checkout.items) && !address) {
+      return res.status(400).json({
+        error: 'Please provide a delivery address for deliver-later items.',
+        code: 'NEEDS_DELIVERY_ADDRESS'
+      });
+    }
+
+    let paymentStatus = 'unpaid';
+    let paymentId = '';
+    if (checkout.paymentMethod === 'online') {
+      const valid = verifyRazorpaySignature({
+        orderId: razorpayOrderId || checkout.razorpayOrderId,
+        paymentId: razorpayPaymentId,
+        signature: razorpaySignature
+      });
+      if (!valid || (checkout.razorpayOrderId && razorpayOrderId && checkout.razorpayOrderId !== razorpayOrderId)) {
+        return res.status(400).json({ error: 'Payment verification failed.' });
+      }
+      paymentStatus = 'paid';
+      paymentId = String(razorpayPaymentId);
+    }
+
+    const created = await createSplitOrders({
+      verifiedItems: checkout.items,
+      customerName: checkout.customerName,
+      customerPhone: checkout.customerPhone,
+      notes: checkout.notes,
+      userId: checkout.userId || user?.id || null,
+      paymentMethod: checkout.paymentMethod,
+      paymentStatus,
+      razorpayOrderId: checkout.razorpayOrderId || razorpayOrderId || '',
+      razorpayPaymentId: paymentId,
+      deliveryAddress: address
+    });
+
+    await dbUpdateCheckout(checkout.id, {
+      status: 'completed',
+      razorpayPaymentId: paymentId,
+      deliveryAddress: address,
+      createdOrders: created
+    });
+
+    res.status(201).json({ orders: created, order: created[0] });
+  } catch (err) {
+    console.error('[Checkout Complete Error]', err);
+    res.status(err.status || 500).json({ error: err.message || 'Could not complete checkout.' });
+  }
+});
+
 // ----------------- ORDERS & ZERO-TRUST SECURITY (Layers 01, 04, 05) -----------------
 
-// Admin: View all orders feed (Strictly Admin-authenticated)
 app.get('/api/orders', authenticateAdmin, async (req, res) => {
   try {
     const orders = await dbGetOrders();
-    res.json(orders);
+    res.json(orders.map(publicOrder));
   } catch (err) {
     console.error('[Get Orders Error]', err);
     res.status(500).json({ error: 'Failed to retrieve orders.' });
@@ -335,35 +638,26 @@ app.get('/api/orders/:id', async (req, res) => {
     const { id } = req.params;
     const order = await dbGetOrderById(id);
 
-    if (!order) {
+    const isAdmin = await checkIsAdmin(req);
+    const clientToken = req.headers['x-order-token'];
+    const hasValidToken = Boolean(
+      order && clientToken && timingSafeCompare(String(clientToken), String(order.accessToken))
+    );
+    const user = await getUserFromRequest(req);
+    const isOwner = Boolean(order && user && order.userId && user.id === order.userId);
+
+    if (!order || (!isAdmin && !hasValidToken && !isOwner)) {
       return res.status(404).json({ error: 'Order not found.' });
     }
 
-    // 1. Check if requester is Admin
-    const isAdmin = await checkIsAdmin(req);
     if (isAdmin) {
-      return res.json(order);
+      return res.json(publicOrder(order));
     }
 
-    // 2. If not admin, verify unguessable secret access token
-    const clientToken = req.headers['x-order-token'] || req.query.token;
-
-    if (!clientToken || !timingSafeCompare(String(clientToken), String(order.accessToken))) {
-      // Layer 04: Generic unauthorized message
-      return res.status(403).json({
-        error: 'Access Denied: You do not have permission to view this order. Valid authorization token required.'
-      });
-    }
-
-    // 3. Customer verified with secret token: mask phone number for defense-in-depth
-    const safeOrder = {
-      ...order,
+    res.json({
+      ...publicOrder(order),
       customerPhone: maskPhoneNumber(order.customerPhone)
-    };
-    // Never expose raw internal accessToken in inspection response
-    delete safeOrder.accessToken;
-
-    res.json(safeOrder);
+    });
   } catch (err) {
     console.error('[Get Order By ID Error]', err);
     res.status(500).json({ error: 'Failed to retrieve order details.' });
@@ -373,80 +667,53 @@ app.get('/api/orders/:id', async (req, res) => {
 // Customer: Place Order (Layer 01 Server Validation + 256-bit unguessable accessToken)
 app.post('/api/orders', orderCreateLimiter, async (req, res) => {
   try {
-    const { customerName, customerPhone, items, notes } = req.body;
+    const user = await getUserFromRequest(req);
+    const { items, notes, paymentMethod, deliveryAddress } = req.body;
+    const method = paymentMethod === 'online' ? 'online' : 'counter';
+    if (method === 'online') {
+      return res.status(400).json({ error: 'Online payments must use /api/checkout/prepare.' });
+    }
 
-    // Layer 01: Strict Server-Side Input Validation
-    if (!customerName || typeof customerName !== 'string' || customerName.trim().length < 2 || customerName.trim().length > 60) {
+    const { customerName, cleanPhone, digitsOnly } = checkoutCustomerFields(req.body, user);
+    if (!customerName || customerName.length < 2 || customerName.length > 60) {
       return res.status(400).json({ error: 'Please enter a valid name (2-60 characters).' });
     }
-    const cleanPhone = String(customerPhone || '').trim().replace(/[^\d+]/g, '');
-    const digitsOnly = cleanPhone.replace(/\D/g, '');
+    if (!user && digitsOnly.length < 8) {
+      return res.status(400).json({ error: 'Phone number is required for guest checkout.' });
+    }
     if (digitsOnly.length < 8 || digitsOnly.length > 18) {
       return res.status(400).json({ error: 'Please enter a valid phone number (8-18 digits).' });
     }
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: 'Your cart cannot be empty.' });
-    }
-    if (items.length > 50) {
-      return res.status(400).json({ error: 'Order exceeds maximum item limit (50 items).' });
-    }
 
-    const products = await dbGetProducts();
-    const productMap = new Map(products.map(p => [p.id, p]));
-
-    let calculatedTotal = 0;
-    const verifiedItems = [];
-
-    for (const item of items) {
-      if (!item || !item.id) {
-        return res.status(400).json({ error: 'Invalid cart item provided.' });
-      }
-      const prod = productMap.get(item.id);
-      if (!prod) {
-        return res.status(400).json({ error: `Selected item is not available on the current menu.` });
-      }
-      if (!prod.isAvailable) {
-        return res.status(400).json({ error: `"${prod.name}" is currently sold out.` });
-      }
-      const qty = Math.max(1, Math.min(50, parseInt(item.quantity, 10) || 1));
-      const subtotal = prod.price * qty;
-      calculatedTotal += subtotal;
-
-      verifiedItems.push({
-        id: prod.id,
-        name: prod.name,
-        price: prod.price,
-        quantity: qty,
-        category: prod.category,
-        imageUrl: prod.imageUrl,
-        subtotal
+    const { verifiedItems } = await verifyCartItems(items);
+    const address = cartNeedsDeliveryAddress(verifiedItems)
+      ? normalizeDeliveryAddress(deliveryAddress)
+      : null;
+    if (cartNeedsDeliveryAddress(verifiedItems) && !address) {
+      return res.status(400).json({
+        error: 'Delivery address is required for deliver-later items.',
+        code: 'NEEDS_DELIVERY_ADDRESS'
       });
     }
 
-    const settings = await dbGetSettings();
-    const accessToken = generateOrderAccessToken();
-
-    const newOrderData = {
-      id: `ord-${crypto.randomUUID().slice(0, 8)}`,
-      customerName: customerName.trim().slice(0, 60),
+    const created = await createSplitOrders({
+      verifiedItems,
+      customerName: customerName.slice(0, 60),
       customerPhone: cleanPhone,
-      items: verifiedItems,
-      totalAmount: calculatedTotal,
-      status: 'pending',
       notes: notes ? String(notes).trim().slice(0, 250) : '',
-      counterName: settings.counterName || 'Main Shop',
-      accessToken: accessToken,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
+      userId: user?.id || null,
+      paymentMethod: 'counter',
+      paymentStatus: 'unpaid',
+      deliveryAddress: address
+    });
 
-    const savedOrder = await dbCreateOrder(newOrderData);
-
-    // Return order with accessToken only to the creator for their private tracker
-    res.status(201).json(savedOrder);
+    res.status(201).json({
+      ...created[0],
+      orders: created
+    });
   } catch (err) {
     console.error('[Create Order Error]', err);
-    res.status(500).json({ error: 'Failed to place order. Please try again.' });
+    res.status(err.status || 500).json({ error: err.message || 'Failed to place order. Please try again.' });
   }
 });
 
@@ -454,19 +721,31 @@ app.post('/api/orders', orderCreateLimiter, async (req, res) => {
 app.patch('/api/orders/:id/status', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
-    const validStatuses = ['pending', 'preparing', 'ready', 'completed', 'cancelled'];
+    const { status, trackingLink } = req.body;
+    const existing = await dbGetOrderById(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'Order not found.' });
+    }
+
+    const kitchenStatuses = ['pending', 'preparing', 'ready', 'completed', 'cancelled'];
+    const deliveryStatuses = ['pending', 'shipped', 'delivered', 'rejected', 'refunded', 'cancelled'];
+    const validStatuses = existing.fulfillmentType === 'delivery' ? deliveryStatuses : kitchenStatuses;
 
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
     }
 
-    const updated = await dbUpdateOrderStatus(id, status);
+    const updates = { status };
+    if (trackingLink !== undefined) updates.trackingLink = sanitizeTrackingUrl(trackingLink);
+    if (status === 'refunded') updates.paymentStatus = 'refunded';
+    if (status === 'preparing' && existing.paymentMethod === 'counter') updates.paymentStatus = 'paid';
+
+    const updated = await dbUpdateOrder(id, updates);
     if (!updated) {
       return res.status(404).json({ error: 'Order not found.' });
     }
 
-    res.json(updated);
+    res.json(publicOrder(updated));
   } catch (err) {
     console.error('[Update Order Status Error]', err);
     res.status(500).json({ error: 'Failed to update order status.' });
@@ -479,13 +758,17 @@ app.get('/api/stats', authenticateAdmin, async (req, res) => {
     const orders = await dbGetOrders();
     const settings = await dbGetSettings();
 
+    const kitchen = orders.filter(o => (o.fulfillmentType || 'immediate') !== 'delivery');
+    const delivery = orders.filter(o => o.fulfillmentType === 'delivery');
+    const billed = orders.filter(o => o.status !== 'cancelled' && o.status !== 'rejected' && o.paymentStatus !== 'refunded');
     const totalOrders = orders.length;
-    const activeOrders = orders.filter(o => o.status !== 'cancelled');
-    const totalRevenue = activeOrders.reduce((sum, o) => sum + (Number(o.totalAmount) || 0), 0);
-    const pendingCount = orders.filter(o => o.status === 'pending').length;
-    const preparingCount = orders.filter(o => o.status === 'preparing').length;
-    const readyCount = orders.filter(o => o.status === 'ready').length;
-    const completedCount = orders.filter(o => o.status === 'completed').length;
+    const totalRevenue = billed.reduce((sum, o) => sum + (Number(o.totalAmount) || 0), 0);
+    const pendingCount = kitchen.filter(o => o.status === 'pending').length;
+    const preparingCount = kitchen.filter(o => o.status === 'preparing').length;
+    const readyCount = kitchen.filter(o => o.status === 'ready').length;
+    const completedCount = kitchen.filter(o => o.status === 'completed').length;
+    const deliveryPendingCount = delivery.filter(o => o.status === 'pending').length;
+    const deliveryShippedCount = delivery.filter(o => o.status === 'shipped').length;
 
     const itemCounts = {};
     orders.forEach(o => {
@@ -508,6 +791,9 @@ app.get('/api/stats', authenticateAdmin, async (req, res) => {
       preparingCount,
       readyCount,
       completedCount,
+      deliveryPendingCount,
+      deliveryShippedCount,
+      deliveryCount: delivery.length,
       popularItems,
       currencySymbol: settings.currencySymbol
     });
@@ -528,11 +814,18 @@ app.get('/api/orders/export/csv', authenticateAdmin, async (req, res) => {
       const dateStr = dateObj.toLocaleDateString();
       const timeStr = dateObj.toLocaleTimeString();
       const itemsSummary = (o.items || []).map(i => `${i.quantity}x ${i.name}`).join('; ');
-      const safeName = `"${(o.customerName || '').replace(/"/g, '""')}"`;
-      const safeNotes = `"${(o.notes || '').replace(/"/g, '""')}"`;
-      const safeItems = `"${itemsSummary.replace(/"/g, '""')}"`;
 
-      csv += `${o.orderNumber},${dateStr},${timeStr},${safeName},${o.customerPhone},${safeItems},${o.totalAmount},${o.status},${safeNotes}\n`;
+      csv += [
+        csvCell(o.orderNumber),
+        csvCell(dateStr),
+        csvCell(timeStr),
+        csvCell(o.customerName),
+        csvCell(o.customerPhone),
+        csvCell(itemsSummary),
+        csvCell(o.totalAmount),
+        csvCell(o.status),
+        csvCell(o.notes)
+      ].join(',') + '\n';
     });
 
     res.setHeader('Content-Type', 'text/csv');
@@ -562,4 +855,7 @@ app.use((req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on port ${PORT} (0.0.0.0)`);
+  if (!process.env.ADMIN_PIN) {
+    console.warn('⚠️ ADMIN_PIN is not set. Using the stored/default PIN. Set ADMIN_PIN before any public deployment.');
+  }
 });

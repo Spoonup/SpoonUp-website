@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import { hashPassword, isHashedSecret, createUserSessionToken, USER_SESSION_TTL_MS } from './security.js';
 import {
   isSupabaseActive,
   fetchSupabaseSettings,
@@ -13,18 +14,31 @@ import {
   fetchSupabaseOrders,
   fetchSupabaseOrderById,
   insertSupabaseOrder,
-  updateSupabaseOrderStatus
+  updateSupabaseOrderStatus,
+  updateSupabaseOrder,
+  fetchSupabaseOrdersByUserId,
+  insertSupabaseUser,
+  fetchSupabaseUserByUsername,
+  fetchSupabaseUserByEmail,
+  fetchSupabaseUserById,
+  insertSupabaseUserSession,
+  fetchSupabaseUserSession,
+  deleteSupabaseUserSession,
+  insertSupabaseCheckout,
+  fetchSupabaseCheckoutById,
+  updateSupabaseCheckout
 } from './supabase.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DB_PATH = path.join(__dirname, '..', 'data', 'db.json');
+const DATA_DIR = path.dirname(DB_PATH);
 
 const INITIAL_DATA = {
   settings: {
     eventName: "SpoonUp",
     currencySymbol: "₹",
-    adminPin: process.env.ADMIN_PIN || "1234",
+    adminPin: hashPassword(process.env.ADMIN_PIN || "1234"),
     counterName: "Main Shop"
   },
   products: [
@@ -36,6 +50,7 @@ const INITIAL_DATA = {
       description: "Nutritious, delicious & guilt-free modak stuffed with aromatic pan, gulkand, and rich dry fruits. (Unit: Per Piece)",
       imageUrl: "/images/menu/modak.jpg",
       isAvailable: true,
+      deliverLater: false,
       createdAt: new Date().toISOString()
     },
     {
@@ -46,6 +61,7 @@ const INITIAL_DATA = {
       description: "Decadent chocolate protein chia pudding with dark chocolate shavings. No Added Sugar. (Unit: Per Piece/Jar)",
       imageUrl: "/images/menu/chia_pudding.jpg",
       isAvailable: true,
+      deliverLater: false,
       createdAt: new Date().toISOString()
     },
     {
@@ -56,6 +72,7 @@ const INITIAL_DATA = {
       description: "Vibrant, antioxidant-rich dragonfruit smoothie with zero added sugar and chia seed topping. (Unit: Per Bottle)",
       imageUrl: "/images/menu/dragonfruit_smoothie.jpg",
       isAvailable: true,
+      deliverLater: false,
       createdAt: new Date().toISOString()
     },
     {
@@ -66,6 +83,7 @@ const INITIAL_DATA = {
       description: "Golden-crisp sabudana and sweet potato tikkis served with fresh coriander-mint chutney. (Unit: Per Plate)",
       imageUrl: "/images/menu/sabudana_tikki.jpg",
       isAvailable: true,
+      deliverLater: false,
       createdAt: new Date().toISOString()
     },
     {
@@ -76,6 +94,7 @@ const INITIAL_DATA = {
       description: "Crispy house-cut healthy fries tossed in aromatic peri-peri spices with house special dip. (Unit: Per Plate)",
       imageUrl: "/images/menu/peri_peri_fries.jpg",
       isAvailable: true,
+      deliverLater: false,
       createdAt: new Date().toISOString()
     },
     {
@@ -136,12 +155,29 @@ const INITIAL_DATA = {
       description: "Premium bowl assortment of Kashmiri Almonds, Cashews, Walnuts, and Blackberries. (Unit: Per 1 kg Bowl)",
       imageUrl: "/images/menu/dry_fruits.jpg",
       isAvailable: true,
+      deliverLater: false,
       createdAt: new Date().toISOString()
     }
   ],
   orders: [],
+  users: [],
+  userSessions: [],
+  checkouts: [],
   nextOrderNumber: 101
 };
+
+function normalizeDb(db) {
+  if (!Array.isArray(db.users)) db.users = [];
+  if (!Array.isArray(db.userSessions)) db.userSessions = [];
+  if (!Array.isArray(db.checkouts)) db.checkouts = [];
+  if (!Array.isArray(db.orders)) db.orders = [];
+  if (!Array.isArray(db.products)) db.products = [];
+  db.products = db.products.map((p) => ({
+    ...p,
+    deliverLater: Boolean(p.deliverLater)
+  }));
+  return db;
+}
 
 export function getDb() {
   if (!fs.existsSync(DB_PATH)) {
@@ -150,7 +186,7 @@ export function getDb() {
   }
   try {
     const raw = fs.readFileSync(DB_PATH, 'utf-8');
-    return JSON.parse(raw);
+    return normalizeDb(JSON.parse(raw));
   } catch (err) {
     console.error("Error reading local database, restoring initial data:", err);
     saveDb(INITIAL_DATA);
@@ -159,9 +195,31 @@ export function getDb() {
 }
 
 export function saveDb(data) {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
   const tempPath = `${DB_PATH}.tmp`;
   fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
   fs.renameSync(tempPath, DB_PATH);
+}
+
+/**
+ * The stored PIN is hashed on first read. While it is still plaintext (fresh install,
+ * or the `CHANGE_ME` schema placeholder) an `ADMIN_PIN` from the environment wins, which
+ * is the supported way to bootstrap or reset the staff PIN. Once hashed, only the
+ * Settings screen can change it — the environment is not a permanent second credential.
+ */
+async function persistHashedPinIfNeeded(settings) {
+  if (!settings?.adminPin || isHashedSecret(settings.adminPin)) {
+    return settings;
+  }
+  const bootstrapPin = process.env.ADMIN_PIN || String(settings.adminPin);
+  try {
+    return await dbUpdateSettings({ adminPin: hashPassword(bootstrapPin) });
+  } catch (err) {
+    console.warn('Could not migrate admin PIN to salted hash:', err.message);
+    return settings;
+  }
 }
 
 // Generates an unguessable 256-bit cryptographically secure secret access token
@@ -175,10 +233,10 @@ export function generateOrderAccessToken() {
 export async function dbGetSettings() {
   if (isSupabaseActive()) {
     const s = await fetchSupabaseSettings();
-    if (s) return s;
+    if (s) return persistHashedPinIfNeeded(s);
   }
   const local = getDb();
-  return local.settings;
+  return persistHashedPinIfNeeded(local.settings);
 }
 
 export async function dbUpdateSettings(updates) {
@@ -228,6 +286,7 @@ export async function dbUpdateProduct(id, updates) {
   if (updates.description !== undefined) prod.description = updates.description.trim();
   if (updates.imageUrl !== undefined) prod.imageUrl = updates.imageUrl.trim();
   if (updates.isAvailable !== undefined) prod.isAvailable = Boolean(updates.isAvailable);
+  if (updates.deliverLater !== undefined) prod.deliverLater = Boolean(updates.deliverLater);
   prod.updatedAt = new Date().toISOString();
   db.products[idx] = prod;
   saveDb(db);
@@ -288,7 +347,163 @@ export async function dbUpdateOrderStatus(id, status) {
   const idx = db.orders.findIndex(o => o.id === id);
   if (idx === -1) return null;
   db.orders[idx].status = status;
+  if (status === 'refunded') db.orders[idx].paymentStatus = 'refunded';
+  if (status === 'preparing' && db.orders[idx].paymentMethod === 'counter') {
+    db.orders[idx].paymentStatus = 'paid';
+  }
   db.orders[idx].updatedAt = new Date().toISOString();
   saveDb(db);
   return db.orders[idx];
+}
+
+export async function dbUpdateOrder(id, updates) {
+  if (isSupabaseActive()) {
+    return await updateSupabaseOrder(id, updates);
+  }
+  const db = getDb();
+  const idx = db.orders.findIndex(o => o.id === id);
+  if (idx === -1) return null;
+  const order = db.orders[idx];
+  if (updates.status !== undefined) order.status = updates.status;
+  if (updates.paymentStatus !== undefined) order.paymentStatus = updates.paymentStatus;
+  if (updates.trackingLink !== undefined) order.trackingLink = updates.trackingLink;
+  if (updates.deliveryAddress !== undefined) order.deliveryAddress = updates.deliveryAddress;
+  order.updatedAt = new Date().toISOString();
+  db.orders[idx] = order;
+  saveDb(db);
+  return order;
+}
+
+export async function dbGetOrdersByUserId(userId) {
+  if (isSupabaseActive()) {
+    return await fetchSupabaseOrdersByUserId(userId);
+  }
+  const db = getDb();
+  return (db.orders || [])
+    .filter(o => o.userId === userId)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+}
+
+export function publicUser(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    phone: user.phone,
+    createdAt: user.createdAt
+  };
+}
+
+export async function dbCreateUser(user) {
+  if (isSupabaseActive()) {
+    return await insertSupabaseUser(user);
+  }
+  const db = getDb();
+  db.users.push(user);
+  saveDb(db);
+  return user;
+}
+
+export async function dbGetUserByUsername(username) {
+  const needle = String(username || '').trim().toLowerCase();
+  if (isSupabaseActive()) {
+    return await fetchSupabaseUserByUsername(needle);
+  }
+  const db = getDb();
+  return db.users.find(u => String(u.username).toLowerCase() === needle) || null;
+}
+
+export async function dbGetUserByEmail(email) {
+  const needle = String(email || '').trim().toLowerCase();
+  if (isSupabaseActive()) {
+    return await fetchSupabaseUserByEmail(needle);
+  }
+  const db = getDb();
+  return db.users.find(u => String(u.email).toLowerCase() === needle) || null;
+}
+
+export async function dbGetUserById(id) {
+  if (isSupabaseActive()) {
+    return await fetchSupabaseUserById(id);
+  }
+  const db = getDb();
+  return db.users.find(u => u.id === id) || null;
+}
+
+export async function dbCreateUserSession(userId) {
+  const session = {
+    token: createUserSessionToken(),
+    userId,
+    expiresAt: new Date(Date.now() + USER_SESSION_TTL_MS).toISOString()
+  };
+  if (isSupabaseActive()) {
+    await insertSupabaseUserSession(session);
+    return session;
+  }
+  const db = getDb();
+  db.userSessions.push(session);
+  saveDb(db);
+  return session;
+}
+
+export async function dbGetUserBySessionToken(token) {
+  if (!token || typeof token !== 'string' || !token.startsWith('usr_')) return null;
+  let session = null;
+  if (isSupabaseActive()) {
+    session = await fetchSupabaseUserSession(token);
+  } else {
+    const db = getDb();
+    session = db.userSessions.find(s => s.token === token) || null;
+  }
+  if (!session) return null;
+  if (new Date(session.expiresAt).getTime() < Date.now()) {
+    await dbDeleteUserSession(token);
+    return null;
+  }
+  return dbGetUserById(session.userId);
+}
+
+export async function dbDeleteUserSession(token) {
+  if (isSupabaseActive()) {
+    return await deleteSupabaseUserSession(token);
+  }
+  const db = getDb();
+  db.userSessions = db.userSessions.filter(s => s.token !== token);
+  saveDb(db);
+  return true;
+}
+
+export async function dbCreateCheckout(checkout) {
+  if (isSupabaseActive()) {
+    return await insertSupabaseCheckout(checkout);
+  }
+  const db = getDb();
+  db.checkouts.push(checkout);
+  saveDb(db);
+  return checkout;
+}
+
+export async function dbGetCheckoutById(id) {
+  if (isSupabaseActive()) {
+    return await fetchSupabaseCheckoutById(id);
+  }
+  const db = getDb();
+  return db.checkouts.find(c => c.id === id) || null;
+}
+
+export async function dbUpdateCheckout(id, updates) {
+  if (isSupabaseActive()) {
+    return await updateSupabaseCheckout(id, updates);
+  }
+  const db = getDb();
+  const idx = db.checkouts.findIndex(c => c.id === id);
+  if (idx === -1) return null;
+  db.checkouts[idx] = {
+    ...db.checkouts[idx],
+    ...updates,
+    updatedAt: new Date().toISOString()
+  };
+  saveDb(db);
+  return db.checkouts[idx];
 }

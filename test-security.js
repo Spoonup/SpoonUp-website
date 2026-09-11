@@ -1,7 +1,7 @@
 import assert from 'assert';
 
 const BASE_URL = 'http://127.0.0.1:5001';
-const ADMIN_PIN = '1234';
+const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
 
 async function runSecurityTests() {
   console.log('🛡️  RUNNING RIGOROUS PRODUCTION SECURITY & ZERO-TRUST TESTS...\n');
@@ -56,20 +56,20 @@ async function runSecurityTests() {
   const snoopWithTokenARes = await fetch(`${BASE_URL}/api/orders/${orderB.id}`, {
     headers: { 'x-order-token': orderA.accessToken }
   });
-  assert.strictEqual(snoopWithTokenARes.status, 403, 'Must return 403 Forbidden');
+  assert.strictEqual(snoopWithTokenARes.status, 404, 'Must return 404 to avoid leaking order existence');
   const snoopWithTokenAData = await snoopWithTokenARes.json();
-  assert.ok(snoopWithTokenAData.error.includes('Access Denied'));
-  console.log('   🔒 BLOCKED (403 Forbidden): Customer A cannot view Customer B’s order!');
+  assert.ok(snoopWithTokenAData.error.includes('not found'));
+  console.log('   🔒 BLOCKED (404): Customer A cannot view Customer B’s order!');
 
   console.log('\n4. Attack Test: Attacker queries Customer B’s order by ID with NO token...');
   const snoopNoTokenRes = await fetch(`${BASE_URL}/api/orders/${orderB.id}`);
-  assert.strictEqual(snoopNoTokenRes.status, 403, 'Must return 403 Forbidden');
-  console.log('   🔒 BLOCKED (403 Forbidden): Snooper without token cannot access order!');
+  assert.strictEqual(snoopNoTokenRes.status, 404, 'Must return 404');
+  console.log('   🔒 BLOCKED (404): Snooper without token cannot access order!');
 
   console.log('\n5. Attack Test: Attacker probes sequential order number (#' + orderB.orderNumber + ') with NO token...');
   const snoopSequentialRes = await fetch(`${BASE_URL}/api/orders/${orderB.orderNumber}`);
-  assert.strictEqual(snoopSequentialRes.status, 403, 'Must return 403 Forbidden');
-  console.log('   🔒 BLOCKED (403 Forbidden): Sequential order guessing attack prevented!');
+  assert.strictEqual(snoopSequentialRes.status, 404, 'Must return 404');
+  console.log('   🔒 BLOCKED (404): Sequential order guessing attack prevented!');
 
   console.log('\n6. Legitimate Access: Customer B views their own Order with Token B...');
   const validAccessRes = await fetch(`${BASE_URL}/api/orders/${orderB.id}`, {
@@ -131,6 +131,154 @@ async function runSecurityTests() {
   });
   assert.strictEqual(invalidOrderRes.status, 400);
   console.log('   ✓ Invalid input rejected with 400 Bad Request');
+
+  const loginRes = await fetch(`${BASE_URL}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pin: ADMIN_PIN })
+  });
+  assert.strictEqual(loginRes.status, 200);
+  const loginData = await loginRes.json();
+  assert.ok(loginData.token, 'Login must issue a session token');
+  assert.notStrictEqual(loginData.token, ADMIN_PIN, 'Session token must not be the raw PIN');
+  assert.ok(loginData.token.startsWith('adm_'), 'Session token must be opaque');
+  console.log('   ✓ Admin login issues opaque session token (PIN not echoed)');
+
+  const session = loginData.token;
+
+  console.log('\n10. Leak Test: /api/settings must never return the stored PIN...');
+  for (const headers of [{}, { 'x-admin-pin': session }]) {
+    const res = await fetch(`${BASE_URL}/api/settings`, { headers });
+    const body = await res.json();
+    assert.strictEqual(body.adminPin, undefined, 'Settings must not expose the admin PIN hash');
+    assert.strictEqual(body.razorpayKeySecret, undefined, 'Settings must not expose Razorpay secret');
+  }
+  console.log('   ✓ PIN hash hidden from both public and admin settings responses');
+
+  console.log('\n11. Account isolation: User A must not read User B orders...');
+  const suffix = Date.now();
+  const signupA = await fetch(`${BASE_URL}/api/auth/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: `sec_a_${suffix}`,
+      password: 'secretpass',
+      email: `seca${suffix}@spoonup.test`,
+      phone: '+919800000001'
+    })
+  });
+  assert.strictEqual(signupA.status, 201);
+  const userA = await signupA.json();
+
+  const signupB = await fetch(`${BASE_URL}/api/auth/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: `sec_b_${suffix}`,
+      password: 'secretpass',
+      email: `secb${suffix}@spoonup.test`,
+      phone: '+919800000002'
+    })
+  });
+  assert.strictEqual(signupB.status, 201);
+  const userB = await signupB.json();
+
+  const orderForB = await fetch(`${BASE_URL}/api/orders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-user-token': userB.token },
+    body: JSON.stringify({
+      customerName: 'User B',
+      customerPhone: '+919800000002',
+      items: [{ id: testProdId, quantity: 1 }]
+    })
+  });
+  assert.strictEqual(orderForB.status, 201);
+  const ownedByB = await orderForB.json();
+
+  const snoopAsA = await fetch(`${BASE_URL}/api/orders/${ownedByB.id}`, {
+    headers: { 'x-user-token': userA.token }
+  });
+  assert.strictEqual(snoopAsA.status, 404, 'Other users must not read profile-linked orders');
+
+  const meOrdersA = await fetch(`${BASE_URL}/api/me/orders`, {
+    headers: { 'x-user-token': userA.token }
+  });
+  assert.strictEqual(meOrdersA.status, 200);
+  const listA = await meOrdersA.json();
+  assert.ok(!listA.some(o => o.id === ownedByB.id));
+
+  const meNoAuth = await fetch(`${BASE_URL}/api/me/orders`);
+  assert.strictEqual(meNoAuth.status, 401);
+  console.log('   🔒 BLOCKED: Cross-account order access and unauthenticated /api/me/orders');
+
+  console.log('\n12. Weak signup and forged online payment must be rejected...');
+  const weakSignup = await fetch(`${BASE_URL}/api/auth/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: 'ab',
+      password: 'short',
+      email: 'not-an-email',
+      phone: '12'
+    })
+  });
+  assert.strictEqual(weakSignup.status, 400);
+
+  const badLogin = await fetch(`${BASE_URL}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: userB.user.username, password: 'wrong-password' })
+  });
+  assert.strictEqual(badLogin.status, 401);
+
+  const fakePay = await fetch(`${BASE_URL}/api/checkout/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      checkoutId: 'chk-does-not-exist',
+      razorpayPaymentId: 'pay_fake',
+      razorpayOrderId: 'order_fake',
+      razorpaySignature: 'deadbeef'
+    })
+  });
+  assert.strictEqual(fakePay.status, 404);
+
+  const kitchenShip = await fetch(`${BASE_URL}/api/orders/${orderB.id}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    body: JSON.stringify({ status: 'shipped' })
+  });
+  assert.strictEqual(kitchenShip.status, 400, 'Kitchen orders cannot use delivery statuses');
+  console.log('   🔒 Weak signup, bad login, fake payment, and illegal status blocked');
+
+  console.log('\n13. Backdoor Test: the old PIN must stop working after a PIN change...');
+  const rotatedPin = 'rotated-pin-9182';
+  const rotateRes = await fetch(`${BASE_URL}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-admin-pin': session },
+    body: JSON.stringify({ adminPin: rotatedPin })
+  });
+  assert.strictEqual(rotateRes.status, 200);
+
+  const oldPinRes = await fetch(`${BASE_URL}/api/orders`, {
+    headers: { 'x-admin-pin': ADMIN_PIN }
+  });
+  assert.strictEqual(oldPinRes.status, 401, 'Superseded PIN must not remain valid');
+
+  const newPinRes = await fetch(`${BASE_URL}/api/orders`, {
+    headers: { 'x-admin-pin': rotatedPin }
+  });
+  assert.strictEqual(newPinRes.status, 200, 'Rotated PIN must work');
+  console.log('   🔒 Superseded PIN rejected (401); rotated PIN accepted (200)');
+
+  // Restore the original PIN so repeat runs stay deterministic.
+  const restoreRes = await fetch(`${BASE_URL}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-admin-pin': rotatedPin },
+    body: JSON.stringify({ adminPin: ADMIN_PIN })
+  });
+  assert.strictEqual(restoreRes.status, 200);
+  console.log('   ✓ Original PIN restored');
 
   console.log('\n🎉 ALL PRODUCTION SECURITY & ZERO-TRUST TESTS PASSED SUCCESSFULLY! 🎉\n');
 }

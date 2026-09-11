@@ -30,7 +30,7 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
   const [price, setPrice] = useState('');
   const [description, setDescription] = useState('');
   const [imageUrl, setImageUrl] = useState('');
-  const [isAvailable, setIsAvailable] = useState(true);
+  const [deliverLater, setDeliverLater] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -49,6 +49,7 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
     setDescription('');
     setImageUrl(PRESET_IMAGES[2].url);
     setIsAvailable(true);
+    setDeliverLater(false);
     setError('');
     setIsModalOpen(true);
   };
@@ -61,6 +62,7 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
     setDescription(prod.description || '');
     setImageUrl(prod.imageUrl || '');
     setIsAvailable(prod.isAvailable !== false);
+    setDeliverLater(Boolean(prod.deliverLater));
     setError('');
     setIsModalOpen(true);
   };
@@ -85,7 +87,8 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
       price: Number(price),
       description: description.trim(),
       imageUrl: imageUrl.trim() || PRESET_IMAGES[0].url,
-      isAvailable
+      isAvailable,
+      deliverLater
     };
 
     try {
@@ -208,6 +211,11 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                     <span className="px-2 py-0.5 rounded-md bg-[#ffefb3] text-[#013e37] text-[10px] font-bold border border-[#f0de99]">
                       {product.category || 'General'}
                     </span>
+                    {product.deliverLater && (
+                      <span className="ml-1 px-2 py-0.5 rounded-md bg-white text-[#013e37] text-[10px] font-bold border border-[#013e37]/20">
+                        Later
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -379,6 +387,19 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                 />
                 <label htmlFor="modalIsAvailable" className="font-bold text-[#013e37] cursor-pointer">
                   In stock & available to order
+                </label>
+              </div>
+
+              <div className="pt-1 flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="modalDeliverLater"
+                  checked={deliverLater}
+                  onChange={(e) => setDeliverLater(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-[#013e37]"
+                />
+                <label htmlFor="modalDeliverLater" className="font-bold text-[#013e37] cursor-pointer">
+                  Deliver later (ships after the event)
                 </label>
               </div>
 

@@ -4,10 +4,10 @@ import {
   Package, 
   Settings as SettingsIcon, 
   LogOut, 
-  Lock, 
   ShoppingBag,
   Clock,
-  Sparkles
+  Truck,
+  User
 } from 'lucide-react';
 import CustomerMenu from './components/CustomerMenu';
 import OrderStatus from './components/OrderStatus';
@@ -15,6 +15,8 @@ import AdminOrders from './components/AdminOrders';
 import AdminProducts from './components/AdminProducts';
 import AdminSettings from './components/AdminSettings';
 import AdminLoginModal from './components/AdminLoginModal';
+import UserAuthModal from './components/UserAuthModal';
+import AdminDeliveries from './components/AdminDeliveries';
 
 // Helper to determine view based on browser URL pathname
 const parseRoute = (pathname, loggedIn) => {
@@ -27,6 +29,9 @@ const parseRoute = (pathname, loggedIn) => {
   }
   if (clean === '/admin/settings') {
     return { view: 'admin_settings', needsAuth: !loggedIn, path: '/admin/settings' };
+  }
+  if (clean === '/admin/deliveries') {
+    return { view: 'admin_deliveries', needsAuth: !loggedIn, path: '/admin/deliveries' };
   }
   if (clean === '/status') {
     return { view: 'status', needsAuth: false, path: '/status' };
@@ -44,6 +49,9 @@ export default function App() {
   });
   const [cart, setCart] = useState([]);
   const [currentOrder, setCurrentOrder] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [userToken, setUserToken] = useState('');
+  const [isUserAuthOpen, setIsUserAuthOpen] = useState(false);
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
   const [adminPin, setAdminPin] = useState('');
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
@@ -83,6 +91,7 @@ export default function App() {
       else if (newView === 'admin_orders') path = '/admin/orders';
       else if (newView === 'admin_products') path = '/admin/products';
       else if (newView === 'admin_settings') path = '/admin/settings';
+      else if (newView === 'admin_deliveries') path = '/admin/deliveries';
     }
     if (path && window.location.pathname !== path) {
       window.history.pushState(null, '', path);
@@ -92,16 +101,31 @@ export default function App() {
   useEffect(() => {
     loadData();
 
-    const savedPin = localStorage.getItem('admin_pin');
-    const loggedIn = Boolean(savedPin);
-    if (savedPin) {
-      setAdminPin(savedPin);
+    // Older builds stored the raw staff PIN; drop it and require a fresh login.
+    localStorage.removeItem('admin_pin');
+
+    const savedSession = localStorage.getItem('admin_session');
+    const loggedIn = Boolean(savedSession);
+    if (savedSession) {
+      setAdminPin(savedSession);
       setIsAdminLoggedIn(true);
     }
 
     const myOrders = JSON.parse(localStorage.getItem('my_orders') || '[]');
     if (myOrders.length > 0) {
       setCurrentOrder(myOrders[0]);
+    }
+
+    const savedUserToken = localStorage.getItem('user_session');
+    if (savedUserToken) {
+      setUserToken(savedUserToken);
+      fetch('/api/auth/me', { headers: { 'x-user-token': savedUserToken } })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data?.user) setCurrentUser(data.user);
+          else localStorage.removeItem('user_session');
+        })
+        .catch(() => {});
     }
 
     // Handle initial URL route (e.g. user typed /wp-admin or /admin in address bar)
@@ -115,8 +139,7 @@ export default function App() {
 
     // Handle browser Back / Forward buttons
     const handlePopState = () => {
-      const pin = localStorage.getItem('admin_pin');
-      const isAuth = Boolean(pin);
+      const isAuth = Boolean(localStorage.getItem('admin_session'));
       const route = parseRoute(window.location.pathname, isAuth);
       if (route.needsAuth) {
         setView('menu');
@@ -141,7 +164,7 @@ export default function App() {
   const handleLoginModalClose = () => {
     setIsLoginModalOpen(false);
     // If user cancelled login modal without logging in, return URL to '/'
-    const savedPin = localStorage.getItem('admin_pin');
+    const savedPin = localStorage.getItem('admin_session');
     if (!savedPin && !isAdminLoggedIn) {
       const clean = window.location.pathname.toLowerCase();
       if (clean.includes('admin') || clean.includes('dashboard')) {
@@ -152,6 +175,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    localStorage.removeItem('admin_session');
     localStorage.removeItem('admin_pin');
     setAdminPin('');
     setIsAdminLoggedIn(false);
@@ -159,8 +183,27 @@ export default function App() {
   };
 
   const handleOrderPlaced = (newOrder) => {
-    setCurrentOrder(newOrder);
+    const first = Array.isArray(newOrder) ? newOrder[0] : newOrder;
+    setCurrentOrder(first);
     navigateTo('status', '/status');
+  };
+
+  const handleUserAuthSuccess = (token, user) => {
+    setUserToken(token);
+    setCurrentUser(user);
+    setIsUserAuthOpen(false);
+  };
+
+  const handleUserLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'x-user-token': userToken }
+      });
+    } catch {}
+    localStorage.removeItem('user_session');
+    setUserToken('');
+    setCurrentUser(null);
   };
 
   const isAdminView = view.startsWith('admin_');
@@ -191,8 +234,24 @@ export default function App() {
           <div className="flex items-center gap-2">
             {!isAdminView ? (
               <>
-                {/* Customer View: Only shows Active Order Tracker if customer has placed an order */}
-                {currentOrder && (
+                {currentUser ? (
+                  <button
+                    onClick={handleUserLogout}
+                    className="px-3 py-1.5 rounded-full text-xs font-semibold bg-white hover:bg-[#ffefb3]/60 text-[#013e37] border border-[#e8e5dc] cursor-pointer flex items-center gap-1.5"
+                  >
+                    <User size={13} />
+                    <span>{currentUser.username}</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setIsUserAuthOpen(true)}
+                    className="px-3 py-1.5 rounded-full text-xs font-semibold bg-white hover:bg-[#ffefb3]/60 text-[#013e37] border border-[#e8e5dc] cursor-pointer flex items-center gap-1.5"
+                  >
+                    <User size={13} />
+                    <span>Login / Sign up</span>
+                  </button>
+                )}
+                {(currentOrder || currentUser) && (
                   <button
                     onClick={() => navigateTo('status', '/status')}
                     className={`px-3 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer border ${
@@ -202,7 +261,7 @@ export default function App() {
                     }`}
                   >
                     <Clock size={13} className="text-[#013e37]" />
-                    <span>Order #{currentOrder.orderNumber}</span>
+                    <span>{currentUser ? 'My orders' : `Order #${currentOrder.orderNumber}`}</span>
                   </button>
                 )}
                 {/* Notice: Admin button is completely hidden from customer view */}
@@ -258,6 +317,18 @@ export default function App() {
               </button>
 
               <button
+                onClick={() => navigateTo('admin_deliveries', '/admin/deliveries')}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
+                  view === 'admin_deliveries'
+                    ? 'bg-[#013e37] text-[#ffefb3]'
+                    : 'bg-white hover:bg-[#ffefb3]/50 text-[#013e37] border border-[#e8e5dc]'
+                }`}
+              >
+                <Truck size={14} />
+                <span>Deliveries</span>
+              </button>
+
+              <button
                 onClick={() => navigateTo('admin_settings', '/admin/settings')}
                 className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
                   view === 'admin_settings'
@@ -282,7 +353,10 @@ export default function App() {
             cart={cart}
             setCart={setCart}
             onOrderPlaced={handleOrderPlaced}
-            onOpenMyOrders={() => setView('status')}
+            onOpenMyOrders={() => navigateTo('status', '/status')}
+            currentUser={currentUser}
+            userToken={userToken}
+            onRequestAuth={() => setIsUserAuthOpen(true)}
           />
         )}
 
@@ -290,8 +364,10 @@ export default function App() {
           <OrderStatus
             orderId={currentOrder?.id}
             initialOrder={currentOrder}
-            onBackToMenu={() => setView('menu')}
+            onBackToMenu={() => navigateTo('menu', '/')}
             currencySymbol={settings.currencySymbol}
+            userToken={userToken}
+            currentUser={currentUser}
           />
         )}
 
@@ -311,6 +387,13 @@ export default function App() {
           />
         )}
 
+        {view === 'admin_deliveries' && (
+          <AdminDeliveries
+            adminPin={adminPin}
+            settings={settings}
+          />
+        )}
+
         {view === 'admin_settings' && (
           <AdminSettings
             adminPin={adminPin}
@@ -325,6 +408,11 @@ export default function App() {
         isOpen={isLoginModalOpen}
         onClose={handleLoginModalClose}
         onLoginSuccess={handleLoginSuccess}
+      />
+      <UserAuthModal
+        isOpen={isUserAuthOpen}
+        onClose={() => setIsUserAuthOpen(false)}
+        onAuthSuccess={handleUserAuthSuccess}
       />
     </div>
   );

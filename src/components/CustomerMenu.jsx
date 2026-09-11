@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Search, 
   ShoppingBag, 
@@ -22,7 +22,10 @@ export default function CustomerMenu({
   cart, 
   setCart, 
   onOrderPlaced,
-  onOpenMyOrders
+  onOpenMyOrders: _onOpenMyOrders,
+  currentUser,
+  userToken,
+  onRequestAuth
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
@@ -33,6 +36,30 @@ export default function CustomerMenu({
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState('counter');
+  const [checkoutStep, setCheckoutStep] = useState('details');
+  const [pendingCheckout, setPendingCheckout] = useState(null);
+  const [razorpayResult, setRazorpayResult] = useState(null);
+  const [addrLine1, setAddrLine1] = useState('');
+  const [addrLine2, setAddrLine2] = useState('');
+  const [addrCity, setAddrCity] = useState('');
+  const [addrState, setAddrState] = useState('');
+  const [addrPincode, setAddrPincode] = useState('');
+  const [addrLandmark, setAddrLandmark] = useState('');
+
+  useEffect(() => {
+    if (!currentUser) return;
+    if (!customerName) setCustomerName(currentUser.username || '');
+    if (currentUser.phone) {
+      const digits = String(currentUser.phone).replace(/\D/g, '');
+      if (digits.startsWith('91') && digits.length === 12) {
+        setCountryCode('+91');
+        setCustomerPhone(digits.slice(2));
+      } else {
+        setCustomerPhone(digits);
+      }
+    }
+  }, [currentUser]);
 
   const currency = settings.currencySymbol || '₹';
 
@@ -81,6 +108,88 @@ export default function CustomerMenu({
 
   const totalItemsCount = cart.reduce((sum, item) => sum + item.quantity, 0);
   const totalCartAmount = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+  const hasDeliverLater = cart.some((item) => item.deliverLater);
+  const razorpayEnabled = Boolean(settings.razorpayEnabled);
+
+  const persistOrders = (orders) => {
+    const storedOrders = JSON.parse(localStorage.getItem('my_orders') || '[]');
+    const tokenMap = JSON.parse(localStorage.getItem('order_tokens') || '{}');
+    orders.forEach((data) => {
+      storedOrders.unshift(data);
+      if (data.accessToken) {
+        tokenMap[data.id] = data.accessToken;
+        tokenMap[String(data.orderNumber)] = data.accessToken;
+      }
+    });
+    localStorage.setItem('my_orders', JSON.stringify(storedOrders));
+    localStorage.setItem('order_tokens', JSON.stringify(tokenMap));
+  };
+
+  const loadRazorpay = () => new Promise((resolve, reject) => {
+    if (window.Razorpay) return resolve();
+    const script = document.createElement('script');
+    script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Could not load Razorpay checkout.'));
+    document.body.appendChild(script);
+  });
+
+  const authHeaders = () => {
+    const headers = { 'Content-Type': 'application/json' };
+    if (userToken) headers['x-user-token'] = userToken;
+    return headers;
+  };
+
+  const completeCheckout = async (checkout, payment, address) => {
+    const res = await fetch('/api/checkout/complete', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        checkoutId: checkout.checkoutId,
+        deliveryAddress: address,
+        razorpayPaymentId: payment?.razorpay_payment_id,
+        razorpayOrderId: payment?.razorpay_order_id,
+        razorpaySignature: payment?.razorpay_signature
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to complete order');
+    const orders = data.orders || [data.order].filter(Boolean);
+    persistOrders(orders);
+    setCart([]);
+    setIsCartOpen(false);
+    setCheckoutStep('details');
+    setPendingCheckout(null);
+    setRazorpayResult(null);
+    try {
+      confetti({
+        particleCount: 70,
+        spread: 60,
+        origin: { y: 0.6 },
+        colors: ['#013e37', '#ffefb3', '#f0de99']
+      });
+    } catch {}
+    onOrderPlaced(orders[0]);
+  };
+
+  const openRazorpay = (checkout) => new Promise((resolve, reject) => {
+    const rzp = new window.Razorpay({
+      key: checkout.razorpayKeyId,
+      amount: Math.round(checkout.amount * 100),
+      currency: 'INR',
+      name: settings.eventName || 'SpoonUp',
+      description: 'Order payment',
+      order_id: checkout.razorpayOrderId,
+      prefill: {
+        name: customerName,
+        contact: `${countryCode}${customerPhone.replace(/\D/g, '')}`,
+        email: currentUser?.email || `${customerPhone.replace(/\D/g, '')}@guest.spoonupfoods.com`
+      },
+      handler: (response) => resolve(response),
+      modal: { ondismiss: () => reject(new Error('Payment cancelled')) }
+    });
+    rzp.open();
+  });
 
   const handleCheckout = async (e) => {
     e.preventDefault();
@@ -89,6 +198,10 @@ export default function CustomerMenu({
       return;
     }
     const cleanNumber = customerPhone.replace(/\D/g, '');
+    if (!currentUser && cleanNumber.length < 8) {
+      setErrorMessage('Phone number is required for guest orders');
+      return;
+    }
     if (cleanNumber.length < 8) {
       setErrorMessage('Please enter a valid phone/WhatsApp number');
       return;
@@ -97,54 +210,68 @@ export default function CustomerMenu({
       setErrorMessage('Your cart is empty');
       return;
     }
+    if (paymentMethod === 'online' && !razorpayEnabled) {
+      setErrorMessage('Online payments are not available. Please pay at the counter.');
+      return;
+    }
+
+    if (checkoutStep === 'address') {
+      if (addrLine1.trim().length < 5 || addrCity.trim().length < 2 || addrPincode.trim().length < 4) {
+        setErrorMessage('Please enter a complete delivery address');
+        return;
+      }
+      setIsSubmitting(true);
+      setErrorMessage('');
+      try {
+        await completeCheckout(pendingCheckout, razorpayResult, {
+          line1: addrLine1,
+          line2: addrLine2,
+          city: addrCity,
+          state: addrState,
+          pincode: addrPincode,
+          landmark: addrLandmark
+        });
+      } catch (err) {
+        setErrorMessage(err.message);
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
 
     setIsSubmitting(true);
     setErrorMessage('');
 
     try {
       const fullPhone = `${countryCode}${cleanNumber}`;
-      const payload = {
-        customerName: customerName.trim(),
-        customerPhone: fullPhone,
-        items: cart.map(item => ({ id: item.id, quantity: item.quantity })),
-        notes: notes.trim()
-      };
-
-      const res = await fetch('/api/orders', {
+      const prepareRes = await fetch('/api/checkout/prepare', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        headers: authHeaders(),
+        body: JSON.stringify({
+          customerName: customerName.trim(),
+          customerPhone: fullPhone,
+          items: cart.map(item => ({ id: item.id, quantity: item.quantity })),
+          notes: notes.trim(),
+          paymentMethod
+        })
       });
+      const checkout = await prepareRes.json();
+      if (!prepareRes.ok) throw new Error(checkout.error || 'Failed to start checkout');
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to place order');
+      let payment = null;
+      if (paymentMethod === 'online') {
+        await loadRazorpay();
+        payment = await openRazorpay(checkout);
       }
 
-      try {
-        confetti({
-          particleCount: 70,
-          spread: 60,
-          origin: { y: 0.6 },
-          colors: ['#013e37', '#ffefb3', '#f0de99']
-        });
-      } catch (err) {}
-
-      const storedOrders = JSON.parse(localStorage.getItem('my_orders') || '[]');
-      storedOrders.unshift(data);
-      localStorage.setItem('my_orders', JSON.stringify(storedOrders));
-
-      // Persist unguessable secret token for this order
-      const tokenMap = JSON.parse(localStorage.getItem('order_tokens') || '{}');
-      if (data.accessToken) {
-        tokenMap[data.id] = data.accessToken;
-        tokenMap[String(data.orderNumber)] = data.accessToken;
+      if (checkout.needsDeliveryAddress) {
+        setPendingCheckout(checkout);
+        setRazorpayResult(payment);
+        setCheckoutStep('address');
+        return;
       }
-      localStorage.setItem('order_tokens', JSON.stringify(tokenMap));
 
-      setCart([]);
-      setIsCartOpen(false);
-      onOrderPlaced(data);
+      await completeCheckout(checkout, payment, null);
     } catch (err) {
       setErrorMessage(err.message);
     } finally {
@@ -275,6 +402,11 @@ export default function CustomerMenu({
                         <span className="inline-block mt-1 text-[10px] font-semibold text-[#013e37] bg-[#ffefb3] px-2 py-0.5 rounded-full border border-[#f0de99]">
                           {product.category}
                         </span>
+                        {product.deliverLater && (
+                          <span className="inline-block mt-1 ml-1 text-[10px] font-semibold text-[#013e37] bg-white px-2 py-0.5 rounded-full border border-[#013e37]/20">
+                            Deliver later
+                          </span>
+                        )}
                         <p className="text-xs text-[#013e37]/70 mt-1 line-clamp-2 leading-relaxed">
                           {product.description || 'Freshly prepared for you.'}
                         </p>
@@ -368,7 +500,10 @@ export default function CustomerMenu({
                 </span>
               </div>
               <button 
-                onClick={() => setIsCartOpen(false)}
+                onClick={() => {
+                  setIsCartOpen(false);
+                  setCheckoutStep('details');
+                }}
                 className="p-1 text-[#013e37]/60 hover:text-[#013e37] rounded-lg hover:bg-[#ffefb3]/50 transition cursor-pointer"
               >
                 <X size={18} />
@@ -389,6 +524,7 @@ export default function CustomerMenu({
                       <p className="font-bold text-[#013e37] text-sm truncate">{item.name}</p>
                       <p className="text-xs text-[#013e37]/70 font-medium">
                         {currency}{item.price} each
+                        {item.deliverLater ? ' · Deliver later' : ''}
                       </p>
                       <p className="text-xs font-bold text-[#013e37] mt-0.5">
                         {currency}{item.price * item.quantity}
@@ -434,6 +570,52 @@ export default function CustomerMenu({
               )}
 
               <div className="space-y-2.5">
+                {checkoutStep === 'address' ? (
+                  <>
+                    <p className="text-xs font-bold text-[#013e37]">
+                      After checkout we will ask for a delivery address for later items.
+                    </p>
+                    <input
+                      placeholder="Address line 1 *"
+                      value={addrLine1}
+                      onChange={(e) => setAddrLine1(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-[#e8e5dc] rounded-xl text-sm"
+                    />
+                    <input
+                      placeholder="Address line 2"
+                      value={addrLine2}
+                      onChange={(e) => setAddrLine2(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-[#e8e5dc] rounded-xl text-sm"
+                    />
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        placeholder="City *"
+                        value={addrCity}
+                        onChange={(e) => setAddrCity(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-[#e8e5dc] rounded-xl text-sm"
+                      />
+                      <input
+                        placeholder="Pincode *"
+                        value={addrPincode}
+                        onChange={(e) => setAddrPincode(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-[#e8e5dc] rounded-xl text-sm"
+                      />
+                    </div>
+                    <input
+                      placeholder="State"
+                      value={addrState}
+                      onChange={(e) => setAddrState(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-[#e8e5dc] rounded-xl text-sm"
+                    />
+                    <input
+                      placeholder="Landmark (optional)"
+                      value={addrLandmark}
+                      onChange={(e) => setAddrLandmark(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-[#e8e5dc] rounded-xl text-sm"
+                    />
+                  </>
+                ) : (
+                  <>
                 <div>
                   <label className="block text-xs font-bold text-[#013e37] mb-1">
                     Your Name *
@@ -455,7 +637,7 @@ export default function CustomerMenu({
                       WhatsApp Phone Number *
                     </span>
                     <span className="text-[10px] text-[#013e37] font-semibold bg-[#ffefb3] px-1.5 py-0.5 rounded border border-[#f0de99]">
-                      For pickup alert
+                      {currentUser ? 'From your profile' : 'Required for guests'}
                     </span>
                   </label>
                   <div className="flex gap-2">
@@ -496,6 +678,56 @@ export default function CustomerMenu({
                     className="w-full px-3 py-2 bg-white border border-[#e8e5dc] rounded-xl text-xs text-[#013e37] focus:border-[#013e37] focus:outline-hidden"
                   />
                 </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-[#013e37] mb-1">Pay</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPaymentMethod('counter')}
+                      className={`py-2 rounded-xl text-xs font-bold border cursor-pointer ${
+                        paymentMethod === 'counter'
+                          ? 'bg-[#013e37] text-[#ffefb3] border-[#013e37]'
+                          : 'bg-white text-[#013e37] border-[#e8e5dc]'
+                      }`}
+                    >
+                      Pay at counter
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!razorpayEnabled) {
+                          setErrorMessage('Online payments are not configured yet.');
+                          return;
+                        }
+                        setPaymentMethod('online');
+                      }}
+                      className={`py-2 rounded-xl text-xs font-bold border cursor-pointer ${
+                        paymentMethod === 'online'
+                          ? 'bg-[#013e37] text-[#ffefb3] border-[#013e37]'
+                          : 'bg-white text-[#013e37] border-[#e8e5dc]'
+                      }`}
+                    >
+                      Pay online
+                    </button>
+                  </div>
+                  {!currentUser && (
+                    <button
+                      type="button"
+                      onClick={onRequestAuth}
+                      className="mt-2 text-[11px] font-semibold text-[#013e37] underline cursor-pointer"
+                    >
+                      Log in to save this order to your profile
+                    </button>
+                  )}
+                  {hasDeliverLater && (
+                    <p className="text-[11px] text-[#013e37]/70 mt-1">
+                      After payment we will ask for a delivery address for later items.
+                    </p>
+                  )}
+                </div>
+                  </>
+                )}
               </div>
 
               {/* Price Summary */}
@@ -509,7 +741,9 @@ export default function CustomerMenu({
                   <span>{currency}{totalCartAmount}</span>
                 </div>
                 <p className="text-[11px] text-[#013e37]/60 text-center pt-0.5">
-                  Pay at counter (Cash / UPI / Card accepted)
+                  {paymentMethod === 'online'
+                    ? 'Pay securely with Razorpay'
+                    : 'Pay at counter (Cash / UPI / Card accepted)'}
                 </p>
               </div>
 
@@ -525,7 +759,7 @@ export default function CustomerMenu({
                 ) : (
                   <>
                     <CheckCircle2 size={16} />
-                    <span>Confirm Order ({currency}{totalCartAmount})</span>
+                    <span>{checkoutStep === 'address' ? 'Save address & place order' : paymentMethod === 'online' ? `Pay ${currency}${totalCartAmount}` : `Confirm Order (${currency}${totalCartAmount})`}</span>
                   </>
                 )}
               </button>

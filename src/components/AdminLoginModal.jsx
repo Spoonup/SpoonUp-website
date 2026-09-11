@@ -30,9 +30,10 @@ export default function AdminLoginModal({ isOpen, onClose, onLoginSuccess }) {
         throw new Error(data.error || 'Authentication failed');
       }
 
-      localStorage.setItem('admin_pin', pin.trim());
+      localStorage.setItem('admin_session', data.token);
+      localStorage.removeItem('admin_pin');
       setPin('');
-      onLoginSuccess(pin.trim(), data.settings);
+      onLoginSuccess(data.token, data.settings);
     } catch (err) {
       setError(err.message);
     } finally {

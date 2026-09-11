@@ -102,12 +102,12 @@ export default function AdminOrders({ adminPin, settings }) {
 
     if (!matchesSearch) return false;
 
-    if (activeTab === 'active') return order.status === 'pending' || order.status === 'preparing';
-    if (activeTab === 'pending') return order.status === 'pending';
-    if (activeTab === 'preparing') return order.status === 'preparing';
+    if (activeTab === 'active') return (order.fulfillmentType !== 'delivery') && (order.status === 'pending' || order.status === 'preparing');
+    if (activeTab === 'pending') return order.fulfillmentType !== 'delivery' && order.status === 'pending';
+    if (activeTab === 'preparing') return order.fulfillmentType !== 'delivery' && order.status === 'preparing';
     if (activeTab === 'ready') return order.status === 'ready';
     if (activeTab === 'completed') return order.status === 'completed';
-    return true;
+    return order.fulfillmentType !== 'delivery';
   });
 
   const getStatusBadge = (status) => {
@@ -315,6 +315,10 @@ export default function AdminOrders({ adminPin, settings }) {
                       <p className="font-bold text-[#013e37] text-xs leading-snug">{order.customerName}</p>
                       <p className="text-[11px] text-[#013e37]/60 font-mono">
                         {order.customerPhone}
+                      </p>
+                      <p className="text-[10px] text-[#013e37]/50 font-medium mt-0.5">
+                        {order.paymentMethod === 'online' ? 'Paid online' : 'Pay at counter'}
+                        {order.paymentStatus === 'paid' ? ' · Paid' : ''}
                       </p>
                     </div>
                   </div>

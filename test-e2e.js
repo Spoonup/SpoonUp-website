@@ -1,7 +1,7 @@
 import assert from 'assert';
 
 const BASE_URL = 'http://127.0.0.1:5001';
-const ADMIN_PIN = '1234';
+const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
 
 async function runTests() {
   console.log('🚀 Running Comprehensive Event Order System Tests...\n');
@@ -149,6 +149,155 @@ async function runTests() {
   assert.ok(csvText.includes('Order Number,Date,Time,Customer Name'));
   assert.ok(csvText.includes('Aarav Patel'));
   console.log('   ✓ CSV Export verified with order data');
+
+  console.log('\n8. Testing customer signup, login, and order linking...');
+  const unique = `user${Date.now()}`;
+  const signupRes = await fetch(`${BASE_URL}/api/auth/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: unique,
+      password: 'secretpass',
+      email: `${unique}@spoonup.test`,
+      phone: '+919876543299'
+    })
+  });
+  assert.strictEqual(signupRes.status, 201);
+  const signup = await signupRes.json();
+  assert.ok(signup.token.startsWith('usr_'));
+  assert.strictEqual(signup.user.username, unique);
+
+  const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: unique, password: 'secretpass' })
+  });
+  assert.strictEqual(loginRes.status, 200);
+  const login = await loginRes.json();
+
+  const linkedOrderRes = await fetch(`${BASE_URL}/api/orders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-user-token': login.token },
+    body: JSON.stringify({
+      customerName: 'Profile User',
+      customerPhone: '+919876543299',
+      items: [{ id: products[0].id, quantity: 1 }]
+    })
+  });
+  assert.strictEqual(linkedOrderRes.status, 201);
+  const linkedOrder = await linkedOrderRes.json();
+  assert.strictEqual(linkedOrder.userId, signup.user.id);
+
+  const myOrdersRes = await fetch(`${BASE_URL}/api/me/orders`, {
+    headers: { 'x-user-token': login.token }
+  });
+  assert.strictEqual(myOrdersRes.status, 200);
+  const myOrders = await myOrdersRes.json();
+  assert.ok(myOrders.some(o => o.id === linkedOrder.id));
+  console.log('   ✓ Account orders are linked to the user profile');
+
+  console.log('\n9. Testing guest phone requirement and deliver-later split...');
+  const guestNoPhone = await fetch(`${BASE_URL}/api/orders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customerName: 'Guest Person',
+      items: [{ id: products[0].id, quantity: 1 }]
+    })
+  });
+  assert.strictEqual(guestNoPhone.status, 400);
+
+  const laterProdRes = await fetch(`${BASE_URL}/api/products`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    body: JSON.stringify({
+      name: 'Event Hamper',
+      category: 'Merchandise',
+      price: 250,
+      deliverLater: true
+    })
+  });
+  assert.strictEqual(laterProdRes.status, 201);
+  const laterProd = await laterProdRes.json();
+  assert.strictEqual(laterProd.deliverLater, true);
+
+  const splitRes = await fetch(`${BASE_URL}/api/orders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customerName: 'Split Guest',
+      customerPhone: '+919111122233',
+      items: [
+        { id: products[0].id, quantity: 1 },
+        { id: laterProd.id, quantity: 1 }
+      ],
+      deliveryAddress: {
+        line1: '12 Event Road',
+        city: 'Pune',
+        state: 'MH',
+        pincode: '411001'
+      }
+    })
+  });
+  assert.strictEqual(splitRes.status, 201);
+  const split = await splitRes.json();
+  assert.strictEqual(split.orders.length, 2);
+  const types = split.orders.map(o => o.fulfillmentType).sort();
+  assert.deepStrictEqual(types, ['delivery', 'immediate']);
+  const delivery = split.orders.find(o => o.fulfillmentType === 'delivery');
+  assert.strictEqual(delivery.deliveryAddress.city, 'Pune');
+
+  const shipRes = await fetch(`${BASE_URL}/api/orders/${delivery.id}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    body: JSON.stringify({ status: 'shipped', trackingLink: 'https://example.com/track/1' })
+  });
+  assert.strictEqual(shipRes.status, 200);
+  const shipped = await shipRes.json();
+  assert.strictEqual(shipped.status, 'shipped');
+  assert.ok(shipped.trackingLink.includes('example.com'));
+  console.log('   ✓ Mixed cart splits into kitchen + delivery orders');
+
+  console.log('\n10. Testing counter checkout prepare + complete...');
+  const prepareRes = await fetch(`${BASE_URL}/api/checkout/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customerName: 'Checkout Guest',
+      customerPhone: '+919700011122',
+      items: [{ id: products[0].id, quantity: 1 }],
+      paymentMethod: 'counter'
+    })
+  });
+  assert.strictEqual(prepareRes.status, 200);
+  const prepared = await prepareRes.json();
+  assert.ok(prepared.checkoutId);
+  assert.strictEqual(prepared.needsDeliveryAddress, false);
+
+  const completeRes = await fetch(`${BASE_URL}/api/checkout/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ checkoutId: prepared.checkoutId })
+  });
+  assert.strictEqual(completeRes.status, 201);
+  const completed = await completeRes.json();
+  assert.ok(completed.order.id);
+  assert.strictEqual(completed.order.paymentMethod, 'counter');
+  assert.strictEqual(completed.orders.length, 1);
+  console.log('   ✓ Counter checkout session creates a kitchen order');
+
+  const onlineWithoutKeys = await fetch(`${BASE_URL}/api/checkout/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customerName: 'Online Guest',
+      customerPhone: '+919700011133',
+      items: [{ id: products[0].id, quantity: 1 }],
+      paymentMethod: 'online'
+    })
+  });
+  assert.ok([400, 503].includes(onlineWithoutKeys.status));
+  console.log('   ✓ Online checkout without Razorpay keys is rejected');
 
   console.log('\n🎉 ALL BACKEND & WORKFLOW TESTS PASSED SUCCESSFULLY! 🎉\n');
 }

@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS products (
   description TEXT DEFAULT '',
   image_url TEXT DEFAULT '',
   is_available BOOLEAN NOT NULL DEFAULT true,
+  deliver_later BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -27,10 +28,22 @@ CREATE TABLE IF NOT EXISTS orders (
   customer_phone TEXT NOT NULL,
   items JSONB NOT NULL DEFAULT '[]'::jsonb,
   total_amount NUMERIC NOT NULL CHECK (total_amount >= 0),
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'preparing', 'ready', 'completed', 'cancelled')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+    'pending', 'preparing', 'ready', 'completed', 'cancelled',
+    'shipped', 'delivered', 'rejected', 'refunded'
+  )),
   notes TEXT DEFAULT '',
   counter_name TEXT DEFAULT 'Main Pickup Counter #1',
   access_token TEXT NOT NULL,
+  user_id TEXT,
+  fulfillment_type TEXT NOT NULL DEFAULT 'immediate' CHECK (fulfillment_type IN ('immediate', 'delivery')),
+  payment_group_id TEXT,
+  payment_method TEXT NOT NULL DEFAULT 'counter' CHECK (payment_method IN ('counter', 'online')),
+  payment_status TEXT NOT NULL DEFAULT 'unpaid' CHECK (payment_status IN ('unpaid', 'paid', 'refunded')),
+  razorpay_order_id TEXT,
+  razorpay_payment_id TEXT,
+  delivery_address JSONB,
+  tracking_link TEXT DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -40,7 +53,7 @@ CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY DEFAULT 1,
   event_name TEXT NOT NULL DEFAULT 'SpoonUp',
   currency_symbol TEXT NOT NULL DEFAULT '₹',
-  admin_pin TEXT NOT NULL DEFAULT '1234',
+  admin_pin TEXT NOT NULL DEFAULT 'CHANGE_ME',
   counter_name TEXT NOT NULL DEFAULT 'Main Shop',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT single_settings_row CHECK (id = 1)
@@ -53,11 +66,20 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 CREATE INDEX IF NOT EXISTS idx_products_available ON products(is_available);
+CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
+CREATE INDEX IF NOT EXISTS idx_orders_fulfillment_type ON orders(fulfillment_type);
+CREATE INDEX IF NOT EXISTS idx_orders_payment_group_id ON orders(payment_group_id);
+CREATE INDEX IF NOT EXISTS idx_orders_status_created_at ON orders (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_updated_at ON orders (updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_products_created_at ON products (created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number_unique ON orders (order_number);
 
 -- 6. Initial Seed Settings
 INSERT INTO settings (id, event_name, currency_symbol, admin_pin, counter_name)
-VALUES (1, 'SpoonUp', '₹', '1234', 'Main Shop')
+VALUES (1, 'SpoonUp', '₹', 'CHANGE_ME', 'Main Shop')
 ON CONFLICT (id) DO NOTHING;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_access_token_unique ON orders(access_token);
 
 -- 7. Initial Seed Menu Products
 INSERT INTO products (id, name, category, price, description, image_url, is_available)
@@ -81,18 +103,76 @@ ON CONFLICT (id) DO UPDATE SET
   image_url = EXCLUDED.image_url,
   is_available = EXCLUDED.is_available;
 
+-- Customer accounts
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  phone TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS checkouts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT,
+  customer_name TEXT NOT NULL,
+  customer_phone TEXT NOT NULL,
+  items JSONB NOT NULL DEFAULT '[]'::jsonb,
+  notes TEXT DEFAULT '',
+  payment_method TEXT NOT NULL,
+  amount NUMERIC NOT NULL CHECK (amount >= 0),
+  status TEXT NOT NULL DEFAULT 'open',
+  razorpay_order_id TEXT,
+  razorpay_payment_id TEXT,
+  delivery_address JSONB,
+  created_orders JSONB DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username_lower ON users ((lower(username)));
+CREATE INDEX IF NOT EXISTS idx_users_email_lower ON users ((lower(email)));
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_checkouts_razorpay_order_id ON checkouts(razorpay_order_id);
+
 -- 8. Row Level Security (RLS) Policies
 ALTER TABLE products ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE checkouts ENABLE ROW LEVEL SECURITY;
 
--- Product Policies: Anyone can view active products
+REVOKE ALL ON TABLE products, orders, settings, users, user_sessions, checkouts FROM anon, authenticated, PUBLIC;
+
+-- Existing databases: add new columns / constraints without dropping data.
+ALTER TABLE products ADD COLUMN IF NOT EXISTS deliver_later BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_type TEXT NOT NULL DEFAULT 'immediate';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_group_id TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'counter';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'unpaid';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS razorpay_order_id TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS razorpay_payment_id TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address JSONB;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_link TEXT DEFAULT '';
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
+ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK (status IN (
+  'pending', 'preparing', 'ready', 'completed', 'cancelled',
+  'shipped', 'delivered', 'rejected', 'refunded'
+));
+
+-- Browser clients must not read settings (admin_pin) or orders directly.
+-- The Node backend uses the service role key, which bypasses RLS.
 DROP POLICY IF EXISTS "Public can view products" ON products;
-CREATE POLICY "Public can view products" ON products FOR SELECT USING (true);
-
--- Settings Policies: Public can read public event settings
 DROP POLICY IF EXISTS "Public can view settings" ON settings;
-CREATE POLICY "Public can view settings" ON settings FOR SELECT USING (true);
 
 -- Order Policies:
 -- Service role (backend API) has full access

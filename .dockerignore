@@ -1,0 +1,17 @@
+.git
+.gitignore
+node_modules
+dist
+data
+*.log
+.env
+.env.*
+!.env.example
+README.md
+test-*.js
+run-all-tests.js
+.oxlintrc.json
+.cursor
+.vscode
+.idea
+**/.DS_Store

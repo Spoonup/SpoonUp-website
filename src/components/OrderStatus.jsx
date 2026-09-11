@@ -17,9 +17,12 @@ export default function OrderStatus({
   orderId, 
   initialOrder, 
   onBackToMenu, 
-  currencySymbol = '₹' 
+  currencySymbol = '₹',
+  userToken = '',
+  currentUser = null
 }) {
   const [order, setOrder] = useState(initialOrder);
+  const [orders, setOrders] = useState(initialOrder ? [initialOrder] : []);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
 
@@ -34,25 +37,42 @@ export default function OrderStatus({
   };
 
   const fetchLatestStatus = async () => {
-    if (!orderId && !initialOrder?.id) return;
-    const targetId = orderId || initialOrder.id;
-    const token = getSecretToken(targetId);
-
     try {
       setIsRefreshing(true);
-      const headers = {};
-      if (token) {
-        headers['x-order-token'] = token;
+      if (userToken) {
+        const res = await fetch('/api/me/orders', { headers: { 'x-user-token': userToken } });
+        if (res.ok) {
+          const list = await res.json();
+          setOrders(list);
+          const selected = list.find(o => o.id === (order?.id || orderId)) || list[0] || null;
+          setOrder(selected);
+          setAccessDenied(false);
+          return;
+        }
+      } else {
+        try {
+          const stored = JSON.parse(localStorage.getItem('my_orders') || '[]');
+          if (stored.length > 1) setOrders(stored);
+        } catch {}
       }
 
+      if (!orderId && !initialOrder?.id) return;
+      const targetId = order?.id || orderId || initialOrder.id;
+      const token = getSecretToken(targetId);
+      const headers = {};
+      if (token) headers['x-order-token'] = token;
       const res = await fetch(`/api/orders/${targetId}`, { headers });
-      if (res.status === 403 || res.status === 401) {
+      if (res.status === 403 || res.status === 401 || res.status === 404) {
         setAccessDenied(true);
         return;
       }
       if (!res.ok) throw new Error('Could not fetch order update');
       const data = await res.json();
       setOrder(data);
+      setOrders((prev) => {
+        const others = prev.filter(o => o.id !== data.id);
+        return [data, ...others];
+      });
       setAccessDenied(false);
     } catch (err) {
       console.warn('Poll error:', err);
@@ -65,7 +85,7 @@ export default function OrderStatus({
     fetchLatestStatus();
     const interval = setInterval(fetchLatestStatus, 4000);
     return () => clearInterval(interval);
-  }, [orderId, initialOrder?.id]);
+  }, [orderId, initialOrder?.id, userToken]);
 
   if (accessDenied) {
     return (
@@ -90,19 +110,37 @@ export default function OrderStatus({
   if (!order) {
     return (
       <div className="max-w-md mx-auto p-6 text-center py-20">
-        <p className="text-[#013e37]/60 text-sm">Loading order status...</p>
+        <p className="text-[#013e37]/60 text-sm">
+          {currentUser ? 'No orders on this account yet.' : 'Loading order status...'}
+        </p>
+        <button onClick={onBackToMenu} className="mt-4 text-xs font-bold text-[#013e37] underline cursor-pointer">
+          Back to menu
+        </button>
       </div>
     );
   }
 
-  const steps = [
-    { key: 'pending', label: 'Payment', desc: 'Pay at Counter / UPI', icon: CreditCard },
-    { key: 'preparing', label: 'Preparing', desc: 'Kitchen Prepping', icon: ChefHat },
-    { key: 'ready', label: 'Ready', desc: 'Pickup at Main Shop', icon: Bell },
-    { key: 'completed', label: 'Collected', desc: 'Enjoy!', icon: CheckCircle2 },
-  ];
+  const isDelivery = order.fulfillmentType === 'delivery';
+  const steps = isDelivery
+    ? [
+        { key: 'pending', label: 'Packed', desc: 'Preparing shipment', icon: CreditCard },
+        { key: 'shipped', label: 'Shipped', desc: 'On the way', icon: MapPin },
+        { key: 'delivered', label: 'Delivered', desc: 'Received', icon: CheckCircle2 },
+      ]
+    : [
+        { key: 'pending', label: 'Payment', desc: 'Pay at Counter / UPI', icon: CreditCard },
+        { key: 'preparing', label: 'Preparing', desc: 'Kitchen Prepping', icon: ChefHat },
+        { key: 'ready', label: 'Ready', desc: 'Pickup at Main Shop', icon: Bell },
+        { key: 'completed', label: 'Collected', desc: 'Enjoy!', icon: CheckCircle2 },
+      ];
 
   const getStepIndex = (st) => {
+    if (isDelivery) {
+      if (st === 'shipped') return 1;
+      if (st === 'delivered') return 2;
+      if (st === 'rejected' || st === 'refunded') return 0;
+      return 0;
+    }
     switch (st) {
       case 'pending': return 0;
       case 'preparing': return 1;
@@ -120,6 +158,23 @@ export default function OrderStatus({
 
   return (
     <div className="max-w-lg mx-auto px-4 py-6">
+      {orders.length > 1 && (
+        <div className="flex gap-2 overflow-x-auto pb-3 no-scrollbar">
+          {orders.map((o) => (
+            <button
+              key={o.id}
+              onClick={() => setOrder(o)}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap border cursor-pointer ${
+                order.id === o.id
+                  ? 'bg-[#013e37] text-[#ffefb3] border-[#013e37]'
+                  : 'bg-white text-[#013e37] border-[#e8e5dc]'
+              }`}
+            >
+              #{o.orderNumber} {o.fulfillmentType === 'delivery' ? '· Delivery' : '· Now'}
+            </button>
+          ))}
+        </div>
+      )}
       {/* Top Bar */}
       <div className="flex items-center justify-between mb-5">
         <button
@@ -156,7 +211,7 @@ export default function OrderStatus({
             : 'bg-[#013e37] text-[#ffefb3]'
         }`}>
           <p className="text-[11px] uppercase font-bold tracking-widest opacity-80">
-            Order Pickup Token
+            {isDelivery ? 'Delivery Order' : 'Order Pickup Token'}
           </p>
           <h1 className="text-5xl font-black tracking-tight my-1">
             #{order.orderNumber}
@@ -167,7 +222,7 @@ export default function OrderStatus({
         </div>
 
         {/* Status Callout Notices */}
-        {isPending && (
+        {isPending && !isDelivery && (
           <div className="bg-[#fffdf5] border-b border-[#f0de99] p-4 text-center">
             <div className="inline-flex items-center gap-1.5 text-[#013e37] font-bold text-xs sm:text-sm">
               <CreditCard className="w-4 h-4 text-amber-700" />
@@ -210,10 +265,10 @@ export default function OrderStatus({
             <div className="absolute top-4 left-6 right-6 h-0.5 bg-[#f0ede4] -z-0" />
             <div 
               className="absolute top-4 left-6 h-0.5 bg-[#013e37] -z-0 transition-all duration-500"
-              style={{ width: `${(currentIndex / 3) * 100}%` }}
+              style={{ width: `${(currentIndex / Math.max(steps.length - 1, 1)) * 100}%` }}
             />
 
-            <div className="grid grid-cols-4 gap-1 text-center relative z-10">
+            <div className={`grid gap-1 text-center relative z-10 ${steps.length === 3 ? 'grid-cols-3' : 'grid-cols-4'}`}>
               {steps.map((step, idx) => {
                 const Icon = step.icon;
                 const isPassed = idx < currentIndex;
@@ -249,8 +304,17 @@ export default function OrderStatus({
               <MapPin size={16} />
             </div>
             <div className="text-xs">
-              <p className="font-bold text-[#013e37]">Pickup Location</p>
-              <p className="text-[#013e37]/70">{order.counterName || "Main Shop"}</p>
+              <p className="font-bold text-[#013e37]">{isDelivery ? 'Delivery address' : 'Pickup Location'}</p>
+              <p className="text-[#013e37]/70">
+                {isDelivery
+                  ? [order.deliveryAddress?.line1, order.deliveryAddress?.city, order.deliveryAddress?.pincode].filter(Boolean).join(', ')
+                  : (order.counterName || 'Main Shop')}
+              </p>
+              {isDelivery && order.trackingLink && (
+                <a href={order.trackingLink} target="_blank" rel="noreferrer" className="text-[#013e37] underline">
+                  Track shipment
+                </a>
+              )}
             </div>
           </div>
         </div>

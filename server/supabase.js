@@ -1,9 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
-dotenv.config(); // Must run before reading process.env — ESM imports hoist before parent dotenv.config()
+dotenv.config({ override: false });
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 let supabase = null;
 
@@ -63,14 +63,9 @@ export async function updateSupabaseSettings(updates) {
   };
 }
 
-export async function fetchSupabaseProducts() {
-  if (!supabase) return null;
-  const { data, error } = await supabase
-    .from('products')
-    .select('*')
-    .order('created_at', { ascending: true });
-  if (error) throw error;
-  return (data || []).map(p => ({
+function mapSupabaseProduct(p) {
+  if (!p) return null;
+  return {
     id: p.id,
     name: p.name,
     category: p.category,
@@ -78,8 +73,19 @@ export async function fetchSupabaseProducts() {
     description: p.description,
     imageUrl: p.image_url,
     isAvailable: p.is_available,
+    deliverLater: Boolean(p.deliver_later),
     createdAt: p.created_at
-  }));
+  };
+}
+
+export async function fetchSupabaseProducts() {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('products')
+    .select('*')
+    .order('created_at', { ascending: true });
+  if (error) throw error;
+  return (data || []).map(mapSupabaseProduct);
 }
 
 export async function insertSupabaseProduct(product) {
@@ -94,22 +100,14 @@ export async function insertSupabaseProduct(product) {
       description: product.description,
       image_url: product.imageUrl,
       is_available: product.isAvailable,
+      deliver_later: Boolean(product.deliverLater),
       created_at: product.createdAt,
       updated_at: new Date().toISOString()
     }])
     .select()
     .single();
   if (error) throw error;
-  return {
-    id: data.id,
-    name: data.name,
-    category: data.category,
-    price: Number(data.price),
-    description: data.description,
-    imageUrl: data.image_url,
-    isAvailable: data.is_available,
-    createdAt: data.created_at
-  };
+  return mapSupabaseProduct(data);
 }
 
 export async function updateSupabaseProduct(id, updates) {
@@ -121,6 +119,7 @@ export async function updateSupabaseProduct(id, updates) {
   if (updates.description !== undefined) payload.description = updates.description;
   if (updates.imageUrl !== undefined) payload.image_url = updates.imageUrl;
   if (updates.isAvailable !== undefined) payload.is_available = updates.isAvailable;
+  if (updates.deliverLater !== undefined) payload.deliver_later = Boolean(updates.deliverLater);
 
   const { data, error } = await supabase
     .from('products')
@@ -129,16 +128,7 @@ export async function updateSupabaseProduct(id, updates) {
     .select()
     .single();
   if (error) throw error;
-  return {
-    id: data.id,
-    name: data.name,
-    category: data.category,
-    price: Number(data.price),
-    description: data.description,
-    imageUrl: data.image_url,
-    isAvailable: data.is_available,
-    createdAt: data.created_at
-  };
+  return mapSupabaseProduct(data);
 }
 
 export async function deleteSupabaseProduct(id) {
@@ -146,29 +136,6 @@ export async function deleteSupabaseProduct(id) {
   const { error } = await supabase.from('products').delete().eq('id', id);
   if (error) throw error;
   return true;
-}
-
-export async function fetchSupabaseOrders() {
-  if (!supabase) return null;
-  const { data, error } = await supabase
-    .from('orders')
-    .select('*')
-    .order('created_at', { ascending: false });
-  if (error) throw error;
-  return (data || []).map(o => ({
-    id: o.id,
-    orderNumber: o.order_number,
-    customerName: o.customer_name,
-    customerPhone: o.customer_phone,
-    items: o.items,
-    totalAmount: Number(o.total_amount),
-    status: o.status,
-    notes: o.notes,
-    counterName: o.counter_name,
-    accessToken: o.access_token,
-    createdAt: o.created_at,
-    updatedAt: o.updated_at
-  }));
 }
 
 function mapSupabaseOrder(data) {
@@ -184,9 +151,28 @@ function mapSupabaseOrder(data) {
     notes: data.notes,
     counterName: data.counter_name,
     accessToken: data.access_token,
+    userId: data.user_id || null,
+    fulfillmentType: data.fulfillment_type || 'immediate',
+    paymentGroupId: data.payment_group_id || null,
+    paymentMethod: data.payment_method || 'counter',
+    paymentStatus: data.payment_status || 'unpaid',
+    razorpayOrderId: data.razorpay_order_id || '',
+    razorpayPaymentId: data.razorpay_payment_id || '',
+    deliveryAddress: data.delivery_address || null,
+    trackingLink: data.tracking_link || '',
     createdAt: data.created_at,
     updatedAt: data.updated_at
   };
+}
+
+export async function fetchSupabaseOrders() {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data || []).map(mapSupabaseOrder);
 }
 
 export async function fetchSupabaseOrderById(id) {
@@ -194,7 +180,6 @@ export async function fetchSupabaseOrderById(id) {
   const trimmed = String(id || '').trim();
   if (!trimmed) return null;
 
-  // 1. Try lookup by order string ID
   const { data: byId, error: errId } = await supabase
     .from('orders')
     .select('*')
@@ -203,7 +188,6 @@ export async function fetchSupabaseOrderById(id) {
   if (errId) throw errId;
   if (byId) return mapSupabaseOrder(byId);
 
-  // 2. If numeric, also try lookup by sequential integer order_number
   if (/^\d+$/.test(trimmed)) {
     const { data: byNum, error: errNum } = await supabase
       .from('orders')
@@ -231,49 +215,224 @@ export async function insertSupabaseOrder(order) {
       notes: order.notes,
       counter_name: order.counterName,
       access_token: order.accessToken,
+      user_id: order.userId || null,
+      fulfillment_type: order.fulfillmentType || 'immediate',
+      payment_group_id: order.paymentGroupId || null,
+      payment_method: order.paymentMethod || 'counter',
+      payment_status: order.paymentStatus || 'unpaid',
+      razorpay_order_id: order.razorpayOrderId || null,
+      razorpay_payment_id: order.razorpayPaymentId || null,
+      delivery_address: order.deliveryAddress || null,
+      tracking_link: order.trackingLink || '',
       created_at: order.createdAt,
       updated_at: order.updatedAt
     }])
     .select()
     .single();
   if (error) throw error;
-  return {
-    id: data.id,
-    orderNumber: data.order_number,
-    customerName: data.customer_name,
-    customerPhone: data.customer_phone,
-    items: data.items,
-    totalAmount: Number(data.total_amount),
-    status: data.status,
-    notes: data.notes,
-    counterName: data.counter_name,
-    accessToken: data.access_token,
-    createdAt: data.created_at,
-    updatedAt: data.updated_at
-  };
+  return mapSupabaseOrder(data);
 }
 
 export async function updateSupabaseOrderStatus(id, status) {
   if (!supabase) return null;
+  return updateSupabaseOrder(id, { status });
+}
+
+export async function updateSupabaseOrder(id, updates) {
+  if (!supabase) return null;
+  const payload = { updated_at: new Date().toISOString() };
+  if (updates.status !== undefined) payload.status = updates.status;
+  if (updates.paymentStatus !== undefined) payload.payment_status = updates.paymentStatus;
+  if (updates.trackingLink !== undefined) payload.tracking_link = updates.trackingLink;
+  if (updates.deliveryAddress !== undefined) payload.delivery_address = updates.deliveryAddress;
+
   const { data, error } = await supabase
     .from('orders')
-    .update({ status, updated_at: new Date().toISOString() })
+    .update(payload)
     .eq('id', id)
     .select()
     .single();
   if (error) throw error;
+  return mapSupabaseOrder(data);
+}
+
+export async function fetchSupabaseOrdersByUserId(userId) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data || []).map(mapSupabaseOrder);
+}
+
+function mapSupabaseUser(row) {
+  if (!row) return null;
   return {
-    id: data.id,
-    orderNumber: data.order_number,
-    customerName: data.customer_name,
-    customerPhone: data.customer_phone,
-    items: data.items,
-    totalAmount: Number(data.total_amount),
-    status: data.status,
-    notes: data.notes,
-    counterName: data.counter_name,
-    accessToken: data.access_token,
-    createdAt: data.created_at,
-    updatedAt: data.updated_at
+    id: row.id,
+    username: row.username,
+    passwordHash: row.password_hash,
+    email: row.email,
+    phone: row.phone,
+    createdAt: row.created_at
   };
+}
+
+export async function insertSupabaseUser(user) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('users')
+    .insert([{
+      id: user.id,
+      username: user.username,
+      password_hash: user.passwordHash,
+      email: user.email,
+      phone: user.phone,
+      created_at: user.createdAt
+    }])
+    .select()
+    .single();
+  if (error) throw error;
+  return mapSupabaseUser(data);
+}
+
+export async function fetchSupabaseUserByUsername(username) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .ilike('username', username)
+    .maybeSingle();
+  if (error) throw error;
+  return mapSupabaseUser(data);
+}
+
+export async function fetchSupabaseUserByEmail(email) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .ilike('email', email)
+    .maybeSingle();
+  if (error) throw error;
+  return mapSupabaseUser(data);
+}
+
+export async function fetchSupabaseUserById(id) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw error;
+  return mapSupabaseUser(data);
+}
+
+export async function insertSupabaseUserSession(session) {
+  if (!supabase) return null;
+  const { error } = await supabase.from('user_sessions').insert([{
+    token: session.token,
+    user_id: session.userId,
+    expires_at: session.expiresAt
+  }]);
+  if (error) throw error;
+  return session;
+}
+
+export async function fetchSupabaseUserSession(token) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('user_sessions')
+    .select('*')
+    .eq('token', token)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return { token: data.token, userId: data.user_id, expiresAt: data.expires_at };
+}
+
+export async function deleteSupabaseUserSession(token) {
+  if (!supabase) return null;
+  const { error } = await supabase.from('user_sessions').delete().eq('token', token);
+  if (error) throw error;
+  return true;
+}
+
+function mapSupabaseCheckout(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    userId: row.user_id || null,
+    customerName: row.customer_name,
+    customerPhone: row.customer_phone,
+    items: row.items,
+    notes: row.notes || '',
+    paymentMethod: row.payment_method,
+    amount: Number(row.amount),
+    status: row.status,
+    razorpayOrderId: row.razorpay_order_id || '',
+    razorpayPaymentId: row.razorpay_payment_id || '',
+    deliveryAddress: row.delivery_address || null,
+    createdOrders: row.created_orders || [],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export async function insertSupabaseCheckout(checkout) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('checkouts')
+    .insert([{
+      id: checkout.id,
+      user_id: checkout.userId || null,
+      customer_name: checkout.customerName,
+      customer_phone: checkout.customerPhone,
+      items: checkout.items,
+      notes: checkout.notes || '',
+      payment_method: checkout.paymentMethod,
+      amount: checkout.amount,
+      status: checkout.status,
+      razorpay_order_id: checkout.razorpayOrderId || null,
+      razorpay_payment_id: checkout.razorpayPaymentId || null,
+      delivery_address: checkout.deliveryAddress || null,
+      created_orders: checkout.createdOrders || [],
+      created_at: checkout.createdAt,
+      updated_at: checkout.updatedAt
+    }])
+    .select()
+    .single();
+  if (error) throw error;
+  return mapSupabaseCheckout(data);
+}
+
+export async function fetchSupabaseCheckoutById(id) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('checkouts')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw error;
+  return mapSupabaseCheckout(data);
+}
+
+export async function updateSupabaseCheckout(id, updates) {
+  if (!supabase) return null;
+  const payload = { updated_at: new Date().toISOString() };
+  if (updates.status !== undefined) payload.status = updates.status;
+  if (updates.razorpayPaymentId !== undefined) payload.razorpay_payment_id = updates.razorpayPaymentId;
+  if (updates.deliveryAddress !== undefined) payload.delivery_address = updates.deliveryAddress;
+  if (updates.createdOrders !== undefined) payload.created_orders = updates.createdOrders;
+
+  const { data, error } = await supabase
+    .from('checkouts')
+    .update(payload)
+    .eq('id', id)
+    .select()
+    .single();
+  if (error) throw error;
+  return mapSupabaseCheckout(data);
 }

@@ -24,7 +24,19 @@ function runScript(scriptPath) {
 
 async function main() {
   console.log('🚀 Starting Event Order System server for automated test run...');
-  const server = spawn('node', ['server/index.js'], { stdio: 'inherit' });
+  const server = spawn('node', ['server/index.js'], {
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      NODE_ENV: 'test',
+      ADMIN_PIN: process.env.ADMIN_PIN || '1234',
+      SUPABASE_URL: '',
+      SUPABASE_SERVICE_ROLE_KEY: '',
+      SUPABASE_ANON_KEY: '',
+      RAZORPAY_KEY_ID: '',
+      RAZORPAY_KEY_SECRET: ''
+    }
+  });
 
   const cleanup = () => {
     try { server.kill('SIGTERM'); } catch {}

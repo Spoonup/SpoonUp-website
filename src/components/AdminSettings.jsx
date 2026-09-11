@@ -70,10 +70,6 @@ export default function AdminSettings({ adminPin, settings, onRefreshSettings })
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save settings');
 
-      if (newPin.trim()) {
-        localStorage.setItem('admin_pin', newPin.trim());
-      }
-
       setSuccessMsg('Settings updated successfully!');
       setNewPin('');
       await onRefreshSettings();
@@ -91,11 +87,28 @@ export default function AdminSettings({ adminPin, settings, onRefreshSettings })
   };
 
   const handlePrintQR = () => {
+    const escapeHtml = (value) => String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+    let safeMenuUrl = '';
+    try {
+      const parsed = new URL(menuUrl);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        safeMenuUrl = parsed.toString();
+      }
+    } catch {
+      safeMenuUrl = '';
+    }
+
     const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
     printWindow.document.write(`
       <html>
         <head>
-          <title>Menu QR Code - ${eventName || 'Event'}</title>
+          <title>Menu QR Code - ${escapeHtml(eventName || 'Event')}</title>
           <style>
             body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; text-align: center; padding: 40px; margin: 0; background: #faf9f5; color: #013e37; }
             .card { max-width: 440px; margin: 0 auto; border: 2px solid #013e37; border-radius: 24px; padding: 36px 24px; background: #ffffff; }
@@ -108,11 +121,11 @@ export default function AdminSettings({ adminPin, settings, onRefreshSettings })
         </head>
         <body>
           <div class="card">
-            <h1>${eventName || 'Event Food & Refreshments'}</h1>
-            <div class="counter-badge">📍 ${counterName || 'Main Shop'}</div>
-            <p><strong>Scan to view menu & order from your phone!</strong><br/>You will receive a WhatsApp ping when your order is ready.</p>
-            <img src="${qrDataUrl}" alt="Scan QR code to order" />
-            <p style="font-size: 12px; font-family: monospace; color: #013e37; opacity: 0.8;">${menuUrl}</p>
+            <h1>${escapeHtml(eventName || 'SpoonUp')}</h1>
+            <div class="counter-badge">📍 ${escapeHtml(counterName || 'Main Shop')}</div>
+            <p><strong>Scan to view menu &amp; order from your phone!</strong><br/>You will receive a WhatsApp ping when your order is ready.</p>
+            <img src="${escapeHtml(qrDataUrl)}" alt="Scan QR code to order" />
+            <p style="font-size: 12px; font-family: monospace; color: #013e37; opacity: 0.8;">${escapeHtml(safeMenuUrl)}</p>
             <div class="footer">Cash / UPI / Card accepted at counter</div>
           </div>
           <script>window.onload = function() { window.print(); }<\/script>
@@ -122,8 +135,24 @@ export default function AdminSettings({ adminPin, settings, onRefreshSettings })
     printWindow.document.close();
   };
 
-  const handleExportCSV = () => {
-    window.open('/api/orders/export/csv', '_blank');
+  const handleExportCSV = async () => {
+    try {
+      const res = await fetch('/api/orders/export/csv', {
+        headers: { 'x-admin-pin': adminPin }
+      });
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `event_orders_${Date.now()}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to export CSV');
+    }
   };
 
   return (

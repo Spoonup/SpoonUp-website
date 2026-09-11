@@ -8,13 +8,17 @@ import {
 } from 'lucide-react';
 
 const PRESET_IMAGES = [
-  { name: 'Coffee / Drinks', url: 'https://images.unsplash.com/photo-1517701604599-bb29b565090c?auto=format&fit=crop&w=400&q=80' },
-  { name: 'Masala Chai', url: 'https://images.unsplash.com/photo-1561336313-0bd5e0b27ec8?auto=format&fit=crop&w=400&q=80' },
-  { name: 'Burger', url: 'https://images.unsplash.com/photo-1550547660-d9450f859349?auto=format&fit=crop&w=400&q=80' },
-  { name: 'Wrap / Roll', url: 'https://images.unsplash.com/photo-1626777552726-4a6b54c97e46?auto=format&fit=crop&w=400&q=80' },
-  { name: 'Fries / Snacks', url: 'https://images.unsplash.com/photo-1576107232684-1279f3908594?auto=format&fit=crop&w=400&q=80' },
-  { name: 'Dessert / Brownie', url: 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=400&q=80' },
-  { name: 'Pizza / Sandwich', url: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=400&q=80' }
+  { name: 'Gulkand Modak', url: '/images/menu/modak.jpg' },
+  { name: 'Chia Pudding', url: '/images/menu/chia_pudding.jpg' },
+  { name: 'Dragonfruit Smoothie', url: '/images/menu/dragonfruit_smoothie.jpg' },
+  { name: 'Sabudana Tikki', url: '/images/menu/sabudana_tikki.jpg' },
+  { name: 'Peri Peri Fries', url: '/images/menu/peri_peri_fries.jpg' },
+  { name: 'Kashmiri Muesli', url: '/images/menu/muesli.jpg' },
+  { name: 'Kashmiri Almonds', url: '/images/menu/almonds.jpg' },
+  { name: 'Kashmiri Cashews', url: '/images/menu/cashews.jpg' },
+  { name: 'Kashmiri Walnuts', url: '/images/menu/walnuts.jpg' },
+  { name: 'Kashmiri Blackberries', url: '/images/menu/blackberries.jpg' },
+  { name: 'Dry Fruits Bowl', url: '/images/menu/dry_fruits.jpg' }
 ];
 
 export default function AdminProducts({ products, onRefreshProducts, adminPin, settings }) {
@@ -31,6 +35,11 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
   const [error, setError] = useState('');
 
   const currency = settings?.currencySymbol || '₹';
+
+  const authHeaders = {
+    'Content-Type': 'application/json',
+    'x-admin-pin': adminPin
+  };
 
   const handleOpenAdd = () => {
     setEditingProduct(null);
@@ -87,7 +96,7 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
         method,
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-pin': adminPin
+          ...authHeaders
         },
         body: JSON.stringify(payload)
       });
@@ -112,7 +121,7 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-pin': adminPin
+          ...authHeaders
         },
         body: JSON.stringify({ isAvailable: !product.isAvailable })
       });

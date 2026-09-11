@@ -62,13 +62,24 @@ ON CONFLICT (id) DO NOTHING;
 -- 7. Initial Seed Menu Products
 INSERT INTO products (id, name, category, price, description, image_url, is_available)
 VALUES
-  ('prod-1', 'Cold Brew Coffee', 'Beverages', 120, 'Slow-steeped artisanal cold coffee served with chilled ice.', 'https://images.unsplash.com/photo-1517701604599-bb29b565090c?auto=format&fit=crop&w=400&q=80', true),
-  ('prod-2', 'Special Masala Chai', 'Beverages', 40, 'Authentic hot spiced tea with cardamom, ginger, and aromatic spices.', 'https://images.unsplash.com/photo-1561336313-0bd5e0b27ec8?auto=format&fit=crop&w=400&q=80', true),
-  ('prod-3', 'Crispy Paneer Wrap', 'Food', 160, 'Spiced paneer cubes, crunchy veggies & mint mayo rolled in a soft tortilla.', 'https://images.unsplash.com/photo-1626777552726-4a6b54c97e46?auto=format&fit=crop&w=400&q=80', true),
-  ('prod-4', 'Signature Veg Burger', 'Food', 140, 'Crispy vegetable patty with melted cheese, lettuce, tomatoes, and tangy sauce.', 'https://images.unsplash.com/photo-1550547660-d9450f859349?auto=format&fit=crop&w=400&q=80', true),
-  ('prod-5', 'Peri Peri French Fries', 'Snacks', 90, 'Golden crispy potato fries tossed in fiery peri-peri seasoning.', 'https://images.unsplash.com/photo-1576107232684-1279f3908594?auto=format&fit=crop&w=400&q=80', true),
-  ('prod-6', 'Rich Fudge Brownie', 'Desserts', 110, 'Decadent warm chocolate fudge brownie with chocolate drizzle.', 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=400&q=80', true)
-ON CONFLICT (id) DO NOTHING;
+  ('prod-1', 'Pan Dry Fruit Gulkand Modak', 'Healthy Sweets', 70, 'Nutritious, delicious & guilt-free modak stuffed with aromatic pan, gulkand, and rich dry fruits. (Unit: Per Piece)', '/images/menu/modak.jpg', true),
+  ('prod-2', 'Chocolate Protein Chia Pudding', 'Desserts', 425, 'Decadent chocolate protein chia pudding with dark chocolate shavings. No Added Sugar. (Unit: Per Piece/Jar)', '/images/menu/chia_pudding.jpg', true),
+  ('prod-3', 'Dragonfruit Smoothie', 'Beverages', 250, 'Vibrant, antioxidant-rich dragonfruit smoothie with zero added sugar and chia seed topping. (Unit: Per Bottle)', '/images/menu/dragonfruit_smoothie.jpg', true),
+  ('prod-4', 'Crispy Sabudana Sweet Potato Tikki with Chutney', 'Snacks', 180, 'Golden-crisp sabudana and sweet potato tikkis served with fresh coriander-mint chutney. (Unit: Per Plate)', '/images/menu/sabudana_tikki.jpg', true),
+  ('prod-5', 'Peri Peri Healthy House Fries with Special Sauce', 'Snacks', 180, 'Crispy house-cut healthy fries tossed in aromatic peri-peri spices with house special dip. (Unit: Per Plate)', '/images/menu/peri_peri_fries.jpg', true),
+  ('prod-6', 'Kashmiri Muesli', 'Healthy Breakfast', 500, 'Crunchy, tasty, snakable and great with milk. 100% natural, NO added sugar. (Unit: Per 100g)', '/images/menu/muesli.jpg', true),
+  ('prod-7', 'Kashmir ke Almonds (100% Pure)', 'Kashmiri Dry Fruits', 1500, '100% Pure premium Kashmiri Almonds (Badam Giri), rich in natural oils and sweetness. (Unit: Per kg)', '/images/menu/almonds.jpg', true),
+  ('prod-8', 'Kashmir ke Cashews (100% Pure)', 'Kashmiri Dry Fruits', 1800, '100% Pure jumbo Kashmiri Cashews (Kaju), naturally sweet, creamy, and crunchy. (Unit: Per kg)', '/images/menu/cashews.jpg', true),
+  ('prod-9', 'Kashmir ke Walnuts (100% Pure)', 'Kashmiri Dry Fruits', 1600, '100% Pure premium Kashmiri Walnut Kernels (Akhrot Giri), rich in Omega-3. (Unit: Per kg)', '/images/menu/walnuts.jpg', true),
+  ('prod-10', 'Kashmir ke Blackberries (100% Pure)', 'Kashmiri Dry Fruits', 1400, 'Sun-dried handpicked pure Kashmiri Blackberries / Berries, rich in natural antioxidants. (Unit: Per kg)', '/images/menu/blackberries.jpg', true),
+  ('prod-11', '100% Pure Kashmiri Dry Fruits Assortment', 'Kashmiri Dry Fruits', 1650, 'Premium bowl assortment of Kashmiri Almonds, Cashews, Walnuts, and Blackberries. (Unit: Per 1 kg Bowl)', '/images/menu/dry_fruits.jpg', true)
+ON CONFLICT (id) DO UPDATE SET
+  name = EXCLUDED.name,
+  category = EXCLUDED.category,
+  price = EXCLUDED.price,
+  description = EXCLUDED.description,
+  image_url = EXCLUDED.image_url,
+  is_available = EXCLUDED.is_available;
 
 -- 8. Row Level Security (RLS) Policies
 ALTER TABLE products ENABLE ROW LEVEL SECURITY;

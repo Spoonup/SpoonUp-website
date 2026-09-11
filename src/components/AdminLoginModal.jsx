@@ -78,14 +78,11 @@ export default function AdminLoginModal({ isOpen, onClose, onLoginSuccess }) {
                 maxLength={8}
                 value={pin}
                 onChange={(e) => setPin(e.target.value)}
-                placeholder="Default: 1234"
+                placeholder="enter the pin"
                 autoFocus
-                className="w-full pl-9 pr-3 py-2.5 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-center text-lg tracking-widest font-mono font-bold text-[#013e37] focus:outline-hidden focus:border-[#013e37]"
+                className="w-full pl-9 pr-3 py-2.5 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-center text-sm tracking-widest font-mono font-bold text-[#013e37] focus:outline-hidden focus:border-[#013e37]"
               />
             </div>
-            <p className="text-[11px] text-[#013e37]/60 mt-2 text-center">
-              Default PIN is <strong className="text-[#013e37]">1234</strong>
-            </p>
           </div>
 
           <div className="pt-1">

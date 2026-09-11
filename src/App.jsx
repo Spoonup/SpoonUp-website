@@ -19,7 +19,7 @@ import AdminLoginModal from './components/AdminLoginModal';
 // Helper to determine view based on browser URL pathname
 const parseRoute = (pathname, loggedIn) => {
   const clean = (pathname || '').toLowerCase().replace(/\/+$/, '') || '/';
-  if (clean === '/admin' || clean === '/wp-admin' || clean === '/dashboard' || clean === '/admin/orders') {
+  if (clean === '/admin' || clean === '/admin/orders') {
     return { view: 'admin_orders', needsAuth: !loggedIn, path: '/admin/orders' };
   }
   if (clean === '/admin/products') {

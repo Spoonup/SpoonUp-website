@@ -7,6 +7,8 @@
 -- 1) Product flag
 ALTER TABLE products
   ADD COLUMN IF NOT EXISTS deliver_later BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE products
+  ADD COLUMN IF NOT EXISTS gst_rate NUMERIC NOT NULL DEFAULT 5;
 
 -- 2) Order fields for users, payments, and delivery
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id TEXT;
@@ -18,6 +20,13 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS razorpay_order_id TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS razorpay_payment_id TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address JSONB;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_link TEXT DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS subtotal_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_amount NUMERIC NOT NULL DEFAULT 0;
+
+-- Existing orders predate separate tax storage; preserve their historical total as base.
+UPDATE orders
+SET subtotal_amount = total_amount
+WHERE subtotal_amount = 0 AND total_amount > 0;
 
 -- 3) Expand allowed order statuses (kitchen + delivery)
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
@@ -62,6 +71,8 @@ CREATE TABLE IF NOT EXISTS checkouts (
   items JSONB NOT NULL DEFAULT '[]'::jsonb,
   notes TEXT DEFAULT '',
   payment_method TEXT NOT NULL,
+  subtotal_amount NUMERIC NOT NULL DEFAULT 0 CHECK (subtotal_amount >= 0),
+  tax_amount NUMERIC NOT NULL DEFAULT 0 CHECK (tax_amount >= 0),
   amount NUMERIC NOT NULL CHECK (amount >= 0),
   status TEXT NOT NULL DEFAULT 'open',
   razorpay_order_id TEXT,
@@ -71,6 +82,9 @@ CREATE TABLE IF NOT EXISTS checkouts (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE checkouts ADD COLUMN IF NOT EXISTS subtotal_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE checkouts ADD COLUMN IF NOT EXISTS tax_amount NUMERIC NOT NULL DEFAULT 0;
 
 -- 5) Indexes
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);

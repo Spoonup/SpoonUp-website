@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS products (
   image_url TEXT DEFAULT '',
   is_available BOOLEAN NOT NULL DEFAULT true,
   deliver_later BOOLEAN NOT NULL DEFAULT false,
+  gst_rate NUMERIC NOT NULL DEFAULT 5 CHECK (gst_rate >= 0 AND gst_rate <= 100),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -27,6 +28,8 @@ CREATE TABLE IF NOT EXISTS orders (
   customer_name TEXT NOT NULL,
   customer_phone TEXT NOT NULL,
   items JSONB NOT NULL DEFAULT '[]'::jsonb,
+  subtotal_amount NUMERIC NOT NULL DEFAULT 0 CHECK (subtotal_amount >= 0),
+  tax_amount NUMERIC NOT NULL DEFAULT 0 CHECK (tax_amount >= 0),
   total_amount NUMERIC NOT NULL CHECK (total_amount >= 0),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
     'pending', 'preparing', 'ready', 'completed', 'cancelled',
@@ -84,17 +87,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_access_token_unique ON orders(acces
 -- 7. Initial Seed Menu Products
 INSERT INTO products (id, name, category, price, description, image_url, is_available)
 VALUES
-  ('prod-1', 'Pan Dry Fruit Gulkand Modak', 'Healthy Sweets', 70, 'Nutritious, delicious & guilt-free modak stuffed with aromatic pan, gulkand, and rich dry fruits. (Unit: Per Piece)', '/images/menu/modak.jpg', true),
-  ('prod-2', 'Chocolate Protein Chia Pudding', 'Desserts', 425, 'Decadent chocolate protein chia pudding with dark chocolate shavings. No Added Sugar. (Unit: Per Piece/Jar)', '/images/menu/chia_pudding.jpg', true),
-  ('prod-3', 'Dragonfruit Smoothie', 'Beverages', 250, 'Vibrant, antioxidant-rich dragonfruit smoothie with zero added sugar and chia seed topping. (Unit: Per Bottle)', '/images/menu/dragonfruit_smoothie.jpg', true),
-  ('prod-4', 'Crispy Sabudana Sweet Potato Tikki with Chutney', 'Snacks', 180, 'Golden-crisp sabudana and sweet potato tikkis served with fresh coriander-mint chutney. (Unit: Per Plate)', '/images/menu/sabudana_tikki.jpg', true),
-  ('prod-5', 'Peri Peri Healthy House Fries with Special Sauce', 'Snacks', 180, 'Crispy house-cut healthy fries tossed in aromatic peri-peri spices with house special dip. (Unit: Per Plate)', '/images/menu/peri_peri_fries.jpg', true),
-  ('prod-6', 'Kashmiri Muesli', 'Healthy Breakfast', 500, 'Crunchy, tasty, snakable and great with milk. 100% natural, NO added sugar. (Unit: Per 100g)', '/images/menu/muesli.jpg', true),
-  ('prod-7', 'Kashmir ke Almonds (100% Pure)', 'Kashmiri Dry Fruits', 1500, '100% Pure premium Kashmiri Almonds (Badam Giri), rich in natural oils and sweetness. (Unit: Per kg)', '/images/menu/almonds.jpg', true),
-  ('prod-8', 'Kashmir ke Cashews (100% Pure)', 'Kashmiri Dry Fruits', 1800, '100% Pure jumbo Kashmiri Cashews (Kaju), naturally sweet, creamy, and crunchy. (Unit: Per kg)', '/images/menu/cashews.jpg', true),
-  ('prod-9', 'Kashmir ke Walnuts (100% Pure)', 'Kashmiri Dry Fruits', 1600, '100% Pure premium Kashmiri Walnut Kernels (Akhrot Giri), rich in Omega-3. (Unit: Per kg)', '/images/menu/walnuts.jpg', true),
-  ('prod-10', 'Kashmir ke Blackberries (100% Pure)', 'Kashmiri Dry Fruits', 1400, 'Sun-dried handpicked pure Kashmiri Blackberries / Berries, rich in natural antioxidants. (Unit: Per kg)', '/images/menu/blackberries.jpg', true),
-  ('prod-11', '100% Pure Kashmiri Dry Fruits Assortment', 'Kashmiri Dry Fruits', 1650, 'Premium bowl assortment of Kashmiri Almonds, Cashews, Walnuts, and Blackberries. (Unit: Per 1 kg Bowl)', '/images/menu/dry_fruits.jpg', true)
+  ('prod-1', 'Pan Dry Fruit Gulkand Modak', 'Healthy Sweets', 70, 'Nutritious, delicious & guilt-free modak stuffed with aromatic pan, gulkand, and rich dry fruits. (Unit: Per Piece)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-1.jpg', true),
+  ('prod-2', 'Chocolate Protein Chia Pudding', 'Desserts', 425, 'Decadent chocolate protein chia pudding with dark chocolate shavings. No Added Sugar. (Unit: Per Piece/Jar)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-2.jpg', true),
+  ('prod-3', 'Dragonfruit Smoothie', 'Beverages', 250, 'Vibrant, antioxidant-rich dragonfruit smoothie with zero added sugar and chia seed topping. (Unit: Per Bottle)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-3.jpg', true),
+  ('prod-4', 'Crispy Sabudana Sweet Potato Tikki with Chutney', 'Snacks', 180, 'Golden-crisp sabudana and sweet potato tikkis served with fresh coriander-mint chutney. (Unit: Per Plate)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-4.jpg', true),
+  ('prod-5', 'Peri Peri Healthy House Fries with Special Sauce', 'Snacks', 180, 'Crispy house-cut healthy fries tossed in aromatic peri-peri spices with house special dip. (Unit: Per Plate)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-5.jpg', true),
+  ('prod-6', 'Kashmiri Muesli', 'Healthy Breakfast', 500, 'Crunchy, tasty, snakable and great with milk. 100% natural, NO added sugar. (Unit: Per 100g)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-6.jpg', true),
+  ('prod-7', 'Kashmir ke Almonds (100% Pure)', 'Kashmiri Dry Fruits', 1500, '100% Pure premium Kashmiri Almonds (Badam Giri), rich in natural oils and sweetness. (Unit: Per kg)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-7.jpg', true),
+  ('prod-8', 'Kashmir ke Cashews (100% Pure)', 'Kashmiri Dry Fruits', 1800, '100% Pure jumbo Kashmiri Cashews (Kaju), naturally sweet, creamy, and crunchy. (Unit: Per kg)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-8.jpg', true),
+  ('prod-9', 'Kashmir ke Walnuts (100% Pure)', 'Kashmiri Dry Fruits', 1600, '100% Pure premium Kashmiri Walnut Kernels (Akhrot Giri), rich in Omega-3. (Unit: Per kg)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-9.jpg', true),
+  ('prod-10', 'Kashmir ke Blackberries (100% Pure)', 'Kashmiri Dry Fruits', 1400, 'Sun-dried handpicked pure Kashmiri Blackberries / Berries, rich in natural antioxidants. (Unit: Per kg)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-10.jpg', true),
+  ('prod-11', '100% Pure Kashmiri Dry Fruits Assortment', 'Kashmiri Dry Fruits', 1650, 'Premium bowl assortment of Kashmiri Almonds, Cashews, Walnuts, and Blackberries. (Unit: Per 1 kg Bowl)', 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-11.jpg', true)
 ON CONFLICT (id) DO UPDATE SET
   name = EXCLUDED.name,
   category = EXCLUDED.category,
@@ -127,6 +130,8 @@ CREATE TABLE IF NOT EXISTS checkouts (
   items JSONB NOT NULL DEFAULT '[]'::jsonb,
   notes TEXT DEFAULT '',
   payment_method TEXT NOT NULL,
+  subtotal_amount NUMERIC NOT NULL DEFAULT 0 CHECK (subtotal_amount >= 0),
+  tax_amount NUMERIC NOT NULL DEFAULT 0 CHECK (tax_amount >= 0),
   amount NUMERIC NOT NULL CHECK (amount >= 0),
   status TEXT NOT NULL DEFAULT 'open',
   razorpay_order_id TEXT,
@@ -154,6 +159,7 @@ REVOKE ALL ON TABLE products, orders, settings, users, user_sessions, checkouts 
 
 -- Existing databases: add new columns / constraints without dropping data.
 ALTER TABLE products ADD COLUMN IF NOT EXISTS deliver_later BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS gst_rate NUMERIC NOT NULL DEFAULT 5;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_type TEXT NOT NULL DEFAULT 'immediate';
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_group_id TEXT;
@@ -163,6 +169,10 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS razorpay_order_id TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS razorpay_payment_id TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address JSONB;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_link TEXT DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS subtotal_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE checkouts ADD COLUMN IF NOT EXISTS subtotal_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE checkouts ADD COLUMN IF NOT EXISTS tax_amount NUMERIC NOT NULL DEFAULT 0;
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
 ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK (status IN (
   'pending', 'preparing', 'ready', 'completed', 'cancelled',

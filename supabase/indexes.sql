@@ -27,6 +27,7 @@ DROP INDEX IF EXISTS idx_orders_order_number;
 
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders (user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_fulfillment_type ON orders (fulfillment_type);
+CREATE INDEX IF NOT EXISTS idx_orders_razorpay_payment_id ON orders (razorpay_payment_id);
 CREATE INDEX IF NOT EXISTS idx_orders_payment_group_id ON orders (payment_group_id);
 
 ANALYZE orders;

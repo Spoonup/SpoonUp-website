@@ -168,13 +168,29 @@ export default function AdminOrders({ adminPin, settings }) {
   return (
     <div className="space-y-5">
       {/* Top Minimal Stat Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="bg-white p-4 rounded-2xl border border-[#e8e5dc]">
-          <span className="text-xs font-semibold text-[#013e37]/70">Total Revenue</span>
+          <span className="text-xs font-semibold text-[#013e37]/70">Total Collected</span>
           <p className="text-2xl font-black text-[#013e37] mt-1">
-            {currency}{stats?.totalRevenue || 0}
+            {currency}{Number(stats?.totalRevenue || 0).toFixed(2)}
           </p>
-          <span className="text-[10px] text-[#013e37]/50">Earnings today</span>
+          <span className="text-[10px] text-[#013e37]/50">Paid orders incl. GST</span>
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl border border-[#e8e5dc]">
+          <span className="text-xs font-semibold text-[#013e37]/70">Base Revenue</span>
+          <p className="text-2xl font-black text-[#013e37] mt-1">
+            {currency}{Number(stats?.baseRevenue || 0).toFixed(2)}
+          </p>
+          <span className="text-[10px] text-[#013e37]/50">Before GST</span>
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl border border-[#e8e5dc]">
+          <span className="text-xs font-semibold text-[#013e37]/70">GST Collected</span>
+          <p className="text-2xl font-black text-[#013e37] mt-1">
+            {currency}{Number(stats?.taxCollected || 0).toFixed(2)}
+          </p>
+          <span className="text-[10px] text-[#013e37]/50">Paid, non-refunded</span>
         </div>
 
         <div className="bg-white p-4 rounded-2xl border border-[#e8e5dc]">
@@ -349,9 +365,12 @@ export default function AdminOrders({ adminPin, settings }) {
                 {/* Actions */}
                 <div className="p-3.5 bg-[#faf9f5] border-t border-[#e8e5dc] space-y-2">
                   <div className="flex justify-between items-center text-xs font-bold text-[#013e37]">
-                    <span>Total Amount</span>
+                    <span>
+                      Base {currency}{Number(order.subtotalAmount ?? order.totalAmount).toFixed(2)}
+                      {' · '}GST {currency}{Number(order.taxAmount || 0).toFixed(2)}
+                    </span>
                     <span className="text-sm font-black">
-                      {currency}{order.totalAmount}
+                      {currency}{Number(order.totalAmount).toFixed(2)}
                     </span>
                   </div>
 

@@ -11,7 +11,7 @@ ENV_FILE="${ENV_FILE:-.env}"
 cd "$(dirname "$0")/.."
 
 if [[ ! -f "$ENV_FILE" ]]; then
-  echo "Missing $ENV_FILE. Copy .env.example and fill ADMIN_PIN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET."
+  echo "Missing $ENV_FILE. Copy .env.example and fill ADMIN_PIN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET."
   exit 1
 fi
 
@@ -34,7 +34,7 @@ ensure_secret() {
 # Parse KEY=VALUE from .env without printing values
 eval "$(python3 - <<'PY'
 from pathlib import Path
-needed = ("ADMIN_PIN", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET")
+needed = ("ADMIN_PIN", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET")
 vals = {}
 for line in Path(".env").read_text().splitlines():
     line = line.strip()
@@ -55,11 +55,12 @@ ensure_secret SUPABASE_URL "$SUPABASE_URL"
 ensure_secret SUPABASE_SERVICE_ROLE_KEY "$SUPABASE_SERVICE_ROLE_KEY"
 ensure_secret RAZORPAY_KEY_ID "$RAZORPAY_KEY_ID"
 ensure_secret RAZORPAY_KEY_SECRET "$RAZORPAY_KEY_SECRET"
+ensure_secret RAZORPAY_WEBHOOK_SECRET "$RAZORPAY_WEBHOOK_SECRET"
 
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
-for secret in ADMIN_PIN SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET; do
+for secret in ADMIN_PIN SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET; do
   gcloud secrets add-iam-policy-binding "$secret" \
     --member="serviceAccount:${RUNTIME_SA}" \
     --role="roles/secretmanager.secretAccessor" \
@@ -84,7 +85,7 @@ gcloud run deploy "$SERVICE" \
   --cpu-throttling \
   --execution-environment=gen2 \
   --env-vars-file=deploy/cloud-run-env.yaml \
-  --set-secrets="ADMIN_PIN=ADMIN_PIN:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest,RAZORPAY_KEY_ID=RAZORPAY_KEY_ID:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest"
+  --set-secrets="ADMIN_PIN=ADMIN_PIN:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest,RAZORPAY_KEY_ID=RAZORPAY_KEY_ID:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest"
 
 echo
 echo "Service URL:"

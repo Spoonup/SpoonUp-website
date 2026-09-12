@@ -4,22 +4,11 @@ import {
   Edit3, 
   Trash2, 
   X, 
-  AlertCircle
+  AlertCircle,
+  UploadCloud
 } from 'lucide-react';
 
-const PRESET_IMAGES = [
-  { name: 'Gulkand Modak', url: '/images/menu/modak.jpg' },
-  { name: 'Chia Pudding', url: '/images/menu/chia_pudding.jpg' },
-  { name: 'Dragonfruit Smoothie', url: '/images/menu/dragonfruit_smoothie.jpg' },
-  { name: 'Sabudana Tikki', url: '/images/menu/sabudana_tikki.jpg' },
-  { name: 'Peri Peri Fries', url: '/images/menu/peri_peri_fries.jpg' },
-  { name: 'Kashmiri Muesli', url: '/images/menu/muesli.jpg' },
-  { name: 'Kashmiri Almonds', url: '/images/menu/almonds.jpg' },
-  { name: 'Kashmiri Cashews', url: '/images/menu/cashews.jpg' },
-  { name: 'Kashmiri Walnuts', url: '/images/menu/walnuts.jpg' },
-  { name: 'Kashmiri Blackberries', url: '/images/menu/blackberries.jpg' },
-  { name: 'Dry Fruits Bowl', url: '/images/menu/dry_fruits.jpg' }
-];
+const FALLBACK_IMAGE = 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-1.jpg';
 
 export default function AdminProducts({ products, onRefreshProducts, adminPin, settings }) {
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -30,6 +19,9 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
   const [price, setPrice] = useState('');
   const [description, setDescription] = useState('');
   const [imageUrl, setImageUrl] = useState('');
+  const [imageFile, setImageFile] = useState(null);
+  const [gstRate, setGstRate] = useState('5');
+  const [isAvailable, setIsAvailable] = useState(true);
   const [deliverLater, setDeliverLater] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState('');
@@ -47,7 +39,9 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
     setCategory('Food');
     setPrice('');
     setDescription('');
-    setImageUrl(PRESET_IMAGES[2].url);
+    setImageUrl('');
+    setImageFile(null);
+    setGstRate('5');
     setIsAvailable(true);
     setDeliverLater(false);
     setError('');
@@ -61,6 +55,8 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
     setPrice(String(prod.price));
     setDescription(prod.description || '');
     setImageUrl(prod.imageUrl || '');
+    setImageFile(null);
+    setGstRate(String(prod.gstRate ?? 5));
     setIsAvailable(prod.isAvailable !== false);
     setDeliverLater(Boolean(prod.deliverLater));
     setError('');
@@ -77,21 +73,42 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
       setError('Please enter a valid price');
       return;
     }
+    if (!editingProduct && !imageFile) {
+      setError('Please select a product image to upload');
+      return;
+    }
 
     setIsSaving(true);
     setError('');
 
-    const payload = {
-      name: name.trim(),
-      category: category.trim(),
-      price: Number(price),
-      description: description.trim(),
-      imageUrl: imageUrl.trim() || PRESET_IMAGES[0].url,
-      isAvailable,
-      deliverLater
-    };
-
     try {
+      let savedImageUrl = imageUrl;
+      if (imageFile) {
+        const uploadRes = await fetch('/api/products/images', {
+          method: 'POST',
+          headers: {
+            'Content-Type': imageFile.type,
+            'x-file-name': imageFile.name,
+            'x-admin-pin': adminPin
+          },
+          body: imageFile
+        });
+        const uploadData = await uploadRes.json();
+        if (!uploadRes.ok) throw new Error(uploadData.error || 'Failed to upload image');
+        savedImageUrl = uploadData.imageUrl;
+      }
+
+      const payload = {
+        name: name.trim(),
+        category: category.trim(),
+        price: Number(price),
+        description: description.trim(),
+        isAvailable,
+        deliverLater,
+        gstRate: Number(gstRate)
+      };
+      if (savedImageUrl) payload.imageUrl = savedImageUrl;
+
       const url = editingProduct ? `/api/products/${editingProduct.id}` : '/api/products';
       const method = editingProduct ? 'PUT' : 'POST';
 
@@ -191,7 +208,7 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                     alt={product.name}
                     className="w-full h-full object-cover"
                     onError={(e) => {
-                      e.target.src = PRESET_IMAGES[0].url;
+                      e.target.src = FALLBACK_IMAGE;
                     }}
                   />
                   <div className="absolute top-2.5 right-2.5">
@@ -348,33 +365,38 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
 
               <div>
                 <label className="block font-bold text-[#013e37] mb-1">
-                  Image URL
+                  Product Image *
                 </label>
-                <input
-                  type="url"
-                  placeholder="https://..."
-                  value={imageUrl}
-                  onChange={(e) => setImageUrl(e.target.value)}
-                  className="w-full px-3 py-2 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-xs text-[#013e37] focus:border-[#013e37] focus:outline-hidden"
-                />
+                <label className="flex items-center justify-center gap-2 w-full px-3 py-3 bg-[#faf9f5] border border-dashed border-[#013e37]/30 rounded-xl cursor-pointer hover:bg-[#ffefb3]/30">
+                  <UploadCloud size={16} />
+                  <span>{imageFile ? imageFile.name : 'Choose image (JPG, PNG, WebP or GIF)'}</span>
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,image/gif"
+                    className="hidden"
+                    onChange={(e) => setImageFile(e.target.files?.[0] || null)}
+                  />
+                </label>
+                {imageUrl && !imageFile && (
+                  <p className="text-[10px] text-[#013e37]/60 mt-1">Current image will be kept unless you choose a new file.</p>
+                )}
+                <p className="text-[10px] text-[#013e37]/60 mt-1">Images are stored and served from Google Cloud Storage.</p>
+              </div>
 
-                <p className="text-[10px] text-[#013e37]/60 mt-1.5 mb-1">Or select a preset:</p>
-                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
-                  {PRESET_IMAGES.map((preset, i) => (
-                    <button
-                      key={i}
-                      type="button"
-                      onClick={() => setImageUrl(preset.url)}
-                      className={`px-2 py-1 text-[10px] font-semibold rounded-lg border transition whitespace-nowrap cursor-pointer ${
-                        imageUrl === preset.url 
-                          ? 'bg-[#ffefb3] border-[#013e37] text-[#013e37] font-bold' 
-                          : 'bg-[#faf9f5] border-[#e8e5dc] text-[#013e37]/70 hover:bg-[#ffefb3]/50'
-                      }`}
-                    >
-                      {preset.name}
-                    </button>
+              <div>
+                <label className="block font-bold text-[#013e37] mb-1">
+                  GST Rate (%)
+                </label>
+                <select
+                  value={gstRate}
+                  onChange={(e) => setGstRate(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-xs text-[#013e37]"
+                >
+                  {[0, 5, 12, 18, 28, 40].map((rate) => (
+                    <option key={rate} value={rate}>{rate}%</option>
                   ))}
-                </div>
+                </select>
+                <p className="text-[10px] text-[#013e37]/60 mt-1">Default restaurant/takeaway rate is 5%. Confirm packaged-goods classification with your GST advisor.</p>
               </div>
 
               <div className="pt-1 flex items-center gap-2">

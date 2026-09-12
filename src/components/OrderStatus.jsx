@@ -13,6 +13,9 @@ import {
   Sparkles
 } from 'lucide-react';
 
+const UPI_PHONE = '+91 91165 08320';
+const UPI_ID = 'anshitakhandelwal7-1@okhdfcbank';
+
 export default function OrderStatus({ 
   orderId, 
   initialOrder, 
@@ -155,6 +158,17 @@ export default function OrderStatus({
   const isPreparing = order.status === 'preparing';
   const isReady = order.status === 'ready';
   const isCompleted = order.status === 'completed';
+  const subtotalAmount = Number(order.subtotalAmount ?? order.totalAmount ?? 0);
+  const taxAmount = Number(order.taxAmount ?? 0);
+  const totalAmount = Number(order.totalAmount ?? 0);
+  const upiUrl = `upi://pay?${new URLSearchParams({
+    pa: UPI_ID,
+    pn: 'SpoonUp',
+    am: totalAmount.toFixed(2),
+    cu: 'INR',
+    tr: `SPOONUP${order.orderNumber}`,
+    tn: `SpoonUp Order #${order.orderNumber}`
+  }).toString()}`;
 
   return (
     <div className="max-w-lg mx-auto px-4 py-6">
@@ -211,7 +225,7 @@ export default function OrderStatus({
             : 'bg-[#013e37] text-[#ffefb3]'
         }`}>
           <p className="text-[11px] uppercase font-bold tracking-widest opacity-80">
-            {isDelivery ? 'Delivery Order' : 'Order Pickup Token'}
+            {isDelivery ? 'Delivery Order Accepted' : 'Order Accepted · Pickup Token'}
           </p>
           <h1 className="text-5xl font-black tracking-tight my-1">
             #{order.orderNumber}
@@ -229,7 +243,19 @@ export default function OrderStatus({
               <span>Awaiting Payment ({currencySymbol}{order.totalAmount})</span>
             </div>
             <p className="text-xs text-[#013e37]/80 mt-1 leading-relaxed">
-              Please complete payment of <strong className="font-bold">{currencySymbol}{order.totalAmount}</strong> at <strong>{order.counterName || 'Main Shop'}</strong> or via UPI. Staff will begin preparing your order once payment is confirmed.
+              Pay <strong className="font-bold">{currencySymbol}{totalAmount.toFixed(2)}</strong> to{' '}
+              <strong>{UPI_ID}</strong> ({UPI_PHONE}) using any UPI app, or pay at{' '}
+              <strong>{order.counterName || 'Main Shop'}</strong>.
+            </p>
+            <a
+              href={upiUrl}
+              className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl bg-[#013e37] px-5 py-2.5 text-xs font-bold text-[#ffefb3]"
+            >
+              <CreditCard size={15} />
+              Open UPI App
+            </a>
+            <p className="text-[11px] text-[#013e37]/65 mt-2">
+              Your phone will show available apps such as GPay, PhonePe or Paytm. Payment confirmation is not automatic yet—please show or send the payment screenshot to the counter.
             </p>
           </div>
         )}
@@ -344,9 +370,17 @@ export default function OrderStatus({
           )}
 
           <div className="pt-2.5 border-t border-[#e8e5dc] flex justify-between items-center font-black text-sm text-[#013e37]">
+            <span>Subtotal</span>
+            <span>{currencySymbol}{subtotalAmount.toFixed(2)}</span>
+          </div>
+          <div className="flex justify-between items-center text-xs text-[#013e37]/70">
+            <span>GST</span>
+            <span>{currencySymbol}{taxAmount.toFixed(2)}</span>
+          </div>
+          <div className="pt-2.5 border-t border-[#e8e5dc] flex justify-between items-center font-black text-sm text-[#013e37]">
             <span>Total</span>
             <span className="text-[#013e37] text-base">
-              {currencySymbol}{order.totalAmount}
+              {currencySymbol}{totalAmount.toFixed(2)}
             </span>
           </div>
         </div>

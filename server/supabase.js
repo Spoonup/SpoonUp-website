@@ -74,6 +74,7 @@ function mapSupabaseProduct(p) {
     imageUrl: p.image_url,
     isAvailable: p.is_available,
     deliverLater: Boolean(p.deliver_later),
+    gstRate: Number(p.gst_rate ?? 5),
     createdAt: p.created_at
   };
 }
@@ -101,6 +102,7 @@ export async function insertSupabaseProduct(product) {
       image_url: product.imageUrl,
       is_available: product.isAvailable,
       deliver_later: Boolean(product.deliverLater),
+      gst_rate: product.gstRate ?? 5,
       created_at: product.createdAt,
       updated_at: new Date().toISOString()
     }])
@@ -120,6 +122,7 @@ export async function updateSupabaseProduct(id, updates) {
   if (updates.imageUrl !== undefined) payload.image_url = updates.imageUrl;
   if (updates.isAvailable !== undefined) payload.is_available = updates.isAvailable;
   if (updates.deliverLater !== undefined) payload.deliver_later = Boolean(updates.deliverLater);
+  if (updates.gstRate !== undefined) payload.gst_rate = updates.gstRate;
 
   const { data, error } = await supabase
     .from('products')
@@ -146,6 +149,8 @@ function mapSupabaseOrder(data) {
     customerName: data.customer_name,
     customerPhone: data.customer_phone,
     items: data.items,
+    subtotalAmount: Number(data.subtotal_amount ?? data.total_amount),
+    taxAmount: Number(data.tax_amount ?? 0),
     totalAmount: Number(data.total_amount),
     status: data.status,
     notes: data.notes,
@@ -210,6 +215,8 @@ export async function insertSupabaseOrder(order) {
       customer_name: order.customerName,
       customer_phone: order.customerPhone,
       items: order.items,
+      subtotal_amount: order.subtotalAmount,
+      tax_amount: order.taxAmount,
       total_amount: order.totalAmount,
       status: order.status,
       notes: order.notes,
@@ -370,6 +377,8 @@ function mapSupabaseCheckout(row) {
     items: row.items,
     notes: row.notes || '',
     paymentMethod: row.payment_method,
+    subtotalAmount: Number(row.subtotal_amount ?? row.amount),
+    taxAmount: Number(row.tax_amount ?? 0),
     amount: Number(row.amount),
     status: row.status,
     razorpayOrderId: row.razorpay_order_id || '',
@@ -393,6 +402,8 @@ export async function insertSupabaseCheckout(checkout) {
       items: checkout.items,
       notes: checkout.notes || '',
       payment_method: checkout.paymentMethod,
+      subtotal_amount: checkout.subtotalAmount,
+      tax_amount: checkout.taxAmount,
       amount: checkout.amount,
       status: checkout.status,
       razorpay_order_id: checkout.razorpayOrderId || null,
@@ -417,6 +428,28 @@ export async function fetchSupabaseCheckoutById(id) {
     .maybeSingle();
   if (error) throw error;
   return mapSupabaseCheckout(data);
+}
+
+export async function fetchSupabaseCheckoutByRazorpayOrderId(razorpayOrderId) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('checkouts')
+    .select('*')
+    .eq('razorpay_order_id', razorpayOrderId)
+    .maybeSingle();
+  if (error) throw error;
+  return mapSupabaseCheckout(data);
+}
+
+export async function fetchSupabaseOrdersByRazorpayPaymentId(paymentId) {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('razorpay_payment_id', paymentId)
+    .order('created_at', { ascending: true });
+  if (error) throw error;
+  return (data || []).map(mapSupabaseOrder);
 }
 
 export async function updateSupabaseCheckout(id, updates) {

@@ -12,9 +12,12 @@ async function waitForServer(url, timeoutMs = 8000) {
   throw new Error('Server did not start within timeout');
 }
 
-function runScript(scriptPath) {
+function runScript(scriptPath, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', [scriptPath], { stdio: 'inherit' });
+    const child = spawn('node', [scriptPath], {
+      stdio: 'inherit',
+      env: { ...process.env, ...extraEnv }
+    });
     child.on('close', code => {
       if (code === 0) resolve();
       else reject(new Error(`${scriptPath} exited with code ${code}`));
@@ -24,17 +27,20 @@ function runScript(scriptPath) {
 
 async function main() {
   console.log('🚀 Starting Event Order System server for automated test run...');
+  const port = process.env.TEST_PORT || '5002';
   const server = spawn('node', ['server/index.js'], {
     stdio: 'inherit',
     env: {
       ...process.env,
       NODE_ENV: 'test',
+      PORT: port,
       ADMIN_PIN: process.env.ADMIN_PIN || '1234',
       SUPABASE_URL: '',
       SUPABASE_SERVICE_ROLE_KEY: '',
       SUPABASE_ANON_KEY: '',
       RAZORPAY_KEY_ID: '',
-      RAZORPAY_KEY_SECRET: ''
+      RAZORPAY_KEY_SECRET: '',
+      RAZORPAY_WEBHOOK_SECRET: 'test-webhook-secret'
     }
   });
 
@@ -47,18 +53,18 @@ async function main() {
   process.on('exit', cleanup);
 
   try {
-    await waitForServer('http://127.0.0.1:5001/api/settings');
-    console.log('✓ Server is live and responding on port 5001.\n');
+    await waitForServer(`http://127.0.0.1:${port}/api/settings`);
+    console.log(`✓ Server is live and responding on port ${port}.\n`);
 
     console.log('====================================================');
     console.log('TEST SUITE 1: End-to-End Customer & Admin Workflow');
     console.log('====================================================');
-    await runScript('test-e2e.js');
+    await runScript('test-e2e.js', { PORT: port });
 
     console.log('\n====================================================');
     console.log('TEST SUITE 2: Production Security & Zero-Trust IDOR');
     console.log('====================================================');
-    await runScript('test-security.js');
+    await runScript('test-security.js', { PORT: port, RAZORPAY_WEBHOOK_SECRET: 'test-webhook-secret' });
 
     console.log('\n🌟 ALL SYSTEM & SECURITY TESTS COMPLETED SUCCESSFULLY! 🌟');
     cleanup();

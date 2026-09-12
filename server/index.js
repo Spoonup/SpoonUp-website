@@ -46,7 +46,9 @@ import {
   isRazorpayConfigured,
   getRazorpayKeyId,
   createRazorpayOrder,
-  verifyRazorpaySignature
+  verifyRazorpaySignature,
+  verifyRazorpayWebhookSignature,
+  isRazorpayWebhookConfigured
 } from './razorpay.js';
 import {
   cleanPhoneNumber,
@@ -54,8 +56,16 @@ import {
   normalizeDeliveryAddress,
   verifyCartItems,
   cartNeedsDeliveryAddress,
-  createSplitOrders
+  createSplitOrders,
+  fulfillPaidCheckout
 } from './checkout.js';
+import { handleRazorpayWebhookEvent } from './webhooks.js';
+import { normalizeGstRate } from './tax.js';
+import {
+  isManagedProductImageUrl,
+  isProductImageStorageConfigured,
+  uploadProductImage
+} from './storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -107,7 +117,17 @@ app.use((req, res, next) => {
     }
   })(req, res, next);
 });
-app.use(express.json({ limit: '64kb' }));
+
+app.use((req, res, next) => {
+  const requestPath = req.originalUrl.split('?')[0];
+  if (requestPath === '/api/webhooks/razorpay') {
+    return express.raw({ type: '*/*', limit: '256kb' })(req, res, next);
+  }
+  if (requestPath === '/api/products/images' && req.method === 'POST') {
+    return express.raw({ type: 'image/*', limit: '5mb' })(req, res, next);
+  }
+  return express.json({ limit: '64kb' })(req, res, next);
+});
 
 // ----------------- RATE LIMITING (Layer 02) -----------------
 // Brute force protection on admin login: Max 5 attempts per 15 minutes per IP
@@ -141,7 +161,8 @@ const generalLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
   max: 300,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  skip: (req) => req.originalUrl.split('?')[0] === '/api/webhooks/razorpay'
 });
 app.use('/api', generalLimiter);
 
@@ -316,13 +337,16 @@ app.get('/api/products', async (req, res) => {
 
 app.post('/api/products', authenticateAdmin, async (req, res) => {
   try {
-    const { name, category, price, description, imageUrl, isAvailable, deliverLater } = req.body;
+    const { name, category, price, description, imageUrl, isAvailable, deliverLater, gstRate } = req.body;
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Valid product name is required.' });
     }
     const numPrice = Number(price);
     if (isNaN(numPrice) || numPrice < 0 || numPrice > 100000) {
       return res.status(400).json({ error: 'Valid price (₹0 - ₹1,00,000) is required.' });
+    }
+    if (isProductImageStorageConfigured() && !isManagedProductImageUrl(imageUrl)) {
+      return res.status(400).json({ error: 'Please upload the product image to Cloud Storage.' });
     }
 
     const newProduct = {
@@ -334,6 +358,7 @@ app.post('/api/products', authenticateAdmin, async (req, res) => {
       imageUrl: sanitizeImageUrl(imageUrl),
       isAvailable: isAvailable !== false,
       deliverLater: Boolean(deliverLater),
+      gstRate: normalizeGstRate(gstRate),
       createdAt: new Date().toISOString()
     };
 
@@ -348,7 +373,7 @@ app.post('/api/products', authenticateAdmin, async (req, res) => {
 app.put('/api/products/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, category, price, description, imageUrl, isAvailable, deliverLater } = req.body;
+    const { name, category, price, description, imageUrl, isAvailable, deliverLater, gstRate } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = String(name).trim().slice(0, 80);
     if (category !== undefined) updates.category = String(category).trim().slice(0, 40);
@@ -359,9 +384,15 @@ app.put('/api/products/:id', authenticateAdmin, async (req, res) => {
       }
     }
     if (description !== undefined) updates.description = String(description).trim().slice(0, 300);
-    if (imageUrl !== undefined) updates.imageUrl = sanitizeImageUrl(imageUrl);
+    if (imageUrl !== undefined) {
+      if (isProductImageStorageConfigured() && !isManagedProductImageUrl(imageUrl)) {
+        return res.status(400).json({ error: 'Please upload the product image to Cloud Storage.' });
+      }
+      updates.imageUrl = sanitizeImageUrl(imageUrl);
+    }
     if (isAvailable !== undefined) updates.isAvailable = Boolean(isAvailable);
     if (deliverLater !== undefined) updates.deliverLater = Boolean(deliverLater);
+    if (gstRate !== undefined) updates.gstRate = normalizeGstRate(gstRate);
 
     const updated = await dbUpdateProduct(id, updates);
     if (!updated) {
@@ -371,6 +402,19 @@ app.put('/api/products/:id', authenticateAdmin, async (req, res) => {
   } catch (err) {
     console.error('[Update Product Error]', err);
     res.status(500).json({ error: 'Failed to update product.' });
+  }
+});
+
+app.post('/api/products/images', authenticateAdmin, async (req, res) => {
+  try {
+    const imageUrl = await uploadProductImage(req.body, {
+      contentType: String(req.headers['content-type'] || '').split(';')[0].trim(),
+      filename: String(req.headers['x-file-name'] || '')
+    });
+    res.status(201).json({ imageUrl });
+  } catch (err) {
+    console.error('[Product Image Upload Error]', err);
+    res.status(err.status || 500).json({ error: err.message || 'Failed to upload product image.' });
   }
 });
 
@@ -499,22 +543,33 @@ app.post('/api/checkout/prepare', orderCreateLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Please enter a valid phone number (8-18 digits).' });
     }
     if (method === 'online' && !isRazorpayConfigured()) {
-      return res.status(503).json({ error: 'Online payments are not configured yet. Please pay at the counter.' });
+      if (process.env.NODE_ENV !== 'test') {
+        return res.status(503).json({ error: 'Online payments are not configured yet. Please pay at the counter.' });
+      }
     }
 
-    const { verifiedItems, calculatedTotal } = await verifyCartItems(items);
+    const {
+      verifiedItems,
+      calculatedSubtotal,
+      calculatedTax,
+      calculatedTotal
+    } = await verifyCartItems(items);
     const needsDeliveryAddress = cartNeedsDeliveryAddress(verifiedItems);
     const checkoutId = `chk-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
     let razorpayOrderId = '';
 
     if (method === 'online') {
-      const rzp = await createRazorpayOrder({
-        amountPaise: Math.round(calculatedTotal * 100),
-        receipt: checkoutId.replace(/-/g, '').slice(0, 40),
-        notes: { checkoutId }
-      });
-      razorpayOrderId = rzp.id;
+      if (isRazorpayConfigured()) {
+        const rzp = await createRazorpayOrder({
+          amountPaise: Math.round(calculatedTotal * 100),
+          receipt: checkoutId.replace(/-/g, '').slice(0, 40),
+          notes: { checkoutId }
+        });
+        razorpayOrderId = rzp.id;
+      } else {
+        razorpayOrderId = `order_test_${checkoutId.replace(/-/g, '').slice(0, 14)}`;
+      }
     }
 
     await dbCreateCheckout({
@@ -525,6 +580,8 @@ app.post('/api/checkout/prepare', orderCreateLimiter, async (req, res) => {
       items: verifiedItems,
       notes: notes ? String(notes).trim().slice(0, 250) : '',
       paymentMethod: method,
+      subtotalAmount: calculatedSubtotal,
+      taxAmount: calculatedTax,
       amount: calculatedTotal,
       status: 'open',
       razorpayOrderId,
@@ -537,6 +594,8 @@ app.post('/api/checkout/prepare', orderCreateLimiter, async (req, res) => {
 
     res.json({
       checkoutId,
+      subtotalAmount: calculatedSubtotal,
+      taxAmount: calculatedTax,
       amount: calculatedTotal,
       paymentMethod: method,
       needsDeliveryAddress,
@@ -564,6 +623,9 @@ app.post('/api/checkout/complete', orderCreateLimiter, async (req, res) => {
     if (!checkout || checkout.status === 'cancelled') {
       return res.status(404).json({ error: 'Checkout session not found.' });
     }
+    if (checkout.status === 'failed') {
+      return res.status(400).json({ error: 'Payment failed. Please try checkout again.' });
+    }
     if (checkout.status === 'completed' && Array.isArray(checkout.createdOrders) && checkout.createdOrders.length) {
       return res.json({ orders: checkout.createdOrders, alreadyCompleted: true });
     }
@@ -578,9 +640,9 @@ app.post('/api/checkout/complete', orderCreateLimiter, async (req, res) => {
       });
     }
 
-    let paymentStatus = 'unpaid';
-    let paymentId = '';
-    if (checkout.paymentMethod === 'online') {
+    const webhookPaid = ['paid', 'completed'].includes(checkout.status) && Boolean(checkout.razorpayPaymentId);
+    let paymentId = checkout.razorpayPaymentId || '';
+    if (checkout.paymentMethod === 'online' && !webhookPaid) {
       const valid = verifyRazorpaySignature({
         orderId: razorpayOrderId || checkout.razorpayOrderId,
         paymentId: razorpayPaymentId,
@@ -589,31 +651,42 @@ app.post('/api/checkout/complete', orderCreateLimiter, async (req, res) => {
       if (!valid || (checkout.razorpayOrderId && razorpayOrderId && checkout.razorpayOrderId !== razorpayOrderId)) {
         return res.status(400).json({ error: 'Payment verification failed.' });
       }
-      paymentStatus = 'paid';
       paymentId = String(razorpayPaymentId);
     }
 
-    const created = await createSplitOrders({
-      verifiedItems: checkout.items,
-      customerName: checkout.customerName,
-      customerPhone: checkout.customerPhone,
-      notes: checkout.notes,
-      userId: checkout.userId || user?.id || null,
-      paymentMethod: checkout.paymentMethod,
-      paymentStatus,
-      razorpayOrderId: checkout.razorpayOrderId || razorpayOrderId || '',
-      razorpayPaymentId: paymentId,
-      deliveryAddress: address
-    });
+    if (checkout.paymentMethod !== 'online') {
+      const created = await createSplitOrders({
+        verifiedItems: checkout.items,
+        customerName: checkout.customerName,
+        customerPhone: checkout.customerPhone,
+        notes: checkout.notes,
+        userId: checkout.userId || user?.id || null,
+        paymentMethod: checkout.paymentMethod,
+        paymentStatus: 'unpaid',
+        razorpayOrderId: '',
+        razorpayPaymentId: '',
+        deliveryAddress: address
+      });
+      await dbUpdateCheckout(checkout.id, {
+        status: 'completed',
+        deliveryAddress: address,
+        createdOrders: created
+      });
+      return res.status(201).json({ orders: created, order: created[0] });
+    }
 
-    await dbUpdateCheckout(checkout.id, {
-      status: 'completed',
-      razorpayPaymentId: paymentId,
+    const result = await fulfillPaidCheckout(checkout, {
+      paymentId,
       deliveryAddress: address,
-      createdOrders: created
+      allowMissingDeliveryAddress: false
     });
 
-    res.status(201).json({ orders: created, order: created[0] });
+    const created = result.orders;
+    res.status(result.alreadyCompleted ? 200 : 201).json({
+      orders: created,
+      order: created[0],
+      alreadyCompleted: result.alreadyCompleted
+    });
   } catch (err) {
     console.error('[Checkout Complete Error]', err);
     res.status(err.status || 500).json({ error: err.message || 'Could not complete checkout.' });
@@ -760,9 +833,18 @@ app.get('/api/stats', authenticateAdmin, async (req, res) => {
 
     const kitchen = orders.filter(o => (o.fulfillmentType || 'immediate') !== 'delivery');
     const delivery = orders.filter(o => o.fulfillmentType === 'delivery');
-    const billed = orders.filter(o => o.status !== 'cancelled' && o.status !== 'rejected' && o.paymentStatus !== 'refunded');
+    const collected = orders.filter(o =>
+      o.paymentStatus === 'paid' &&
+      o.status !== 'cancelled' &&
+      o.status !== 'rejected'
+    );
     const totalOrders = orders.length;
-    const totalRevenue = billed.reduce((sum, o) => sum + (Number(o.totalAmount) || 0), 0);
+    const baseRevenue = collected.reduce(
+      (sum, o) => sum + (Number(o.subtotalAmount) || Number(o.totalAmount) || 0),
+      0
+    );
+    const taxCollected = collected.reduce((sum, o) => sum + (Number(o.taxAmount) || 0), 0);
+    const totalRevenue = collected.reduce((sum, o) => sum + (Number(o.totalAmount) || 0), 0);
     const pendingCount = kitchen.filter(o => o.status === 'pending').length;
     const preparingCount = kitchen.filter(o => o.status === 'preparing').length;
     const readyCount = kitchen.filter(o => o.status === 'ready').length;
@@ -787,6 +869,8 @@ app.get('/api/stats', authenticateAdmin, async (req, res) => {
     res.json({
       totalOrders,
       totalRevenue,
+      baseRevenue,
+      taxCollected,
       pendingCount,
       preparingCount,
       readyCount,
@@ -808,7 +892,7 @@ app.get('/api/orders/export/csv', authenticateAdmin, async (req, res) => {
   try {
     const orders = await dbGetOrders();
 
-    let csv = 'Order Number,Date,Time,Customer Name,Phone,Items Summary,Total Amount,Status,Notes\n';
+    let csv = 'Order Number,Date,Time,Customer Name,Phone,Items Summary,Base Amount,GST,Total Amount,Status,Notes\n';
     orders.forEach(o => {
       const dateObj = new Date(o.createdAt);
       const dateStr = dateObj.toLocaleDateString();
@@ -822,6 +906,8 @@ app.get('/api/orders/export/csv', authenticateAdmin, async (req, res) => {
         csvCell(o.customerName),
         csvCell(o.customerPhone),
         csvCell(itemsSummary),
+        csvCell(o.subtotalAmount || o.totalAmount),
+        csvCell(o.taxAmount || 0),
         csvCell(o.totalAmount),
         csvCell(o.status),
         csvCell(o.notes)
@@ -834,6 +920,32 @@ app.get('/api/orders/export/csv', authenticateAdmin, async (req, res) => {
   } catch (err) {
     console.error('[CSV Export Error]', err);
     res.status(500).json({ error: 'Failed to export CSV report.' });
+  }
+});
+
+app.post('/api/webhooks/razorpay', async (req, res) => {
+  try {
+    if (!isRazorpayWebhookConfigured()) {
+      return res.status(503).json({ error: 'Webhook secret is not configured.' });
+    }
+    const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
+    const signature = req.headers['x-razorpay-signature'];
+    if (!verifyRazorpayWebhookSignature(rawBody, signature)) {
+      return res.status(400).json({ error: 'Invalid webhook signature.' });
+    }
+
+    let event;
+    try {
+      event = JSON.parse(rawBody.toString('utf8'));
+    } catch {
+      return res.status(400).json({ error: 'Invalid webhook payload.' });
+    }
+
+    const result = await handleRazorpayWebhookEvent(event);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[Razorpay Webhook Error]', err);
+    res.status(500).json({ error: 'Webhook handler failed.' });
   }
 });
 

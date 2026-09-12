@@ -1,6 +1,6 @@
 import assert from 'assert';
 
-const BASE_URL = 'http://127.0.0.1:5001';
+const BASE_URL = `http://127.0.0.1:${process.env.PORT || 5001}`;
 const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
 
 async function runTests() {
@@ -46,6 +46,12 @@ async function runTests() {
   assert.ok(order.orderNumber >= 101);
   assert.strictEqual(order.status, 'pending');
   assert.strictEqual(order.customerName, 'Aarav Patel');
+  assert.ok(order.subtotalAmount > 0);
+  assert.ok(order.taxAmount > 0);
+  assert.strictEqual(
+    Number(order.totalAmount.toFixed(2)),
+    Number((order.subtotalAmount + order.taxAmount).toFixed(2))
+  );
   console.log(`   ✓ Order placed successfully! Token: #${order.orderNumber} (ID: ${order.id})`);
 
   // 4. Verify Single Order Query (for customer tracking)
@@ -139,6 +145,8 @@ async function runTests() {
   assert.strictEqual(statsRes.status, 200);
   const stats = await statsRes.json();
   assert.ok(stats.totalOrders >= 1);
+  assert.ok(stats.baseRevenue >= 0);
+  assert.ok(stats.taxCollected >= 0);
   console.log(`   ✓ Stats: Total Orders: ${stats.totalOrders}, Revenue: ₹${stats.totalRevenue}`);
 
   const csvRes = await fetch(`${BASE_URL}/api/orders/export/csv`, {
@@ -286,7 +294,7 @@ async function runTests() {
   assert.strictEqual(completed.orders.length, 1);
   console.log('   ✓ Counter checkout session creates a kitchen order');
 
-  const onlineWithoutKeys = await fetch(`${BASE_URL}/api/checkout/prepare`, {
+  const onlinePrepare = await fetch(`${BASE_URL}/api/checkout/prepare`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -296,8 +304,20 @@ async function runTests() {
       paymentMethod: 'online'
     })
   });
-  assert.ok([400, 503].includes(onlineWithoutKeys.status));
-  console.log('   ✓ Online checkout without Razorpay keys is rejected');
+  assert.strictEqual(onlinePrepare.status, 200);
+  const onlinePrepared = await onlinePrepare.json();
+  const fakeComplete = await fetch(`${BASE_URL}/api/checkout/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      checkoutId: onlinePrepared.checkoutId,
+      razorpayPaymentId: 'pay_fake',
+      razorpayOrderId: onlinePrepared.razorpayOrderId,
+      razorpaySignature: 'deadbeef'
+    })
+  });
+  assert.strictEqual(fakeComplete.status, 400);
+  console.log('   ✓ Online checkout without a verified payment is rejected');
 
   console.log('\n🎉 ALL BACKEND & WORKFLOW TESTS PASSED SUCCESSFULLY! 🎉\n');
 }

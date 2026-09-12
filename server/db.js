@@ -26,7 +26,9 @@ import {
   deleteSupabaseUserSession,
   insertSupabaseCheckout,
   fetchSupabaseCheckoutById,
-  updateSupabaseCheckout
+  fetchSupabaseCheckoutByRazorpayOrderId,
+  updateSupabaseCheckout,
+  fetchSupabaseOrdersByRazorpayPaymentId
 } from './supabase.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -48,7 +50,7 @@ const INITIAL_DATA = {
       category: "Healthy Sweets",
       price: 70,
       description: "Nutritious, delicious & guilt-free modak stuffed with aromatic pan, gulkand, and rich dry fruits. (Unit: Per Piece)",
-      imageUrl: "/images/menu/modak.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-1.jpg",
       isAvailable: true,
       deliverLater: false,
       createdAt: new Date().toISOString()
@@ -59,7 +61,7 @@ const INITIAL_DATA = {
       category: "Desserts",
       price: 425,
       description: "Decadent chocolate protein chia pudding with dark chocolate shavings. No Added Sugar. (Unit: Per Piece/Jar)",
-      imageUrl: "/images/menu/chia_pudding.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-2.jpg",
       isAvailable: true,
       deliverLater: false,
       createdAt: new Date().toISOString()
@@ -70,7 +72,7 @@ const INITIAL_DATA = {
       category: "Beverages",
       price: 250,
       description: "Vibrant, antioxidant-rich dragonfruit smoothie with zero added sugar and chia seed topping. (Unit: Per Bottle)",
-      imageUrl: "/images/menu/dragonfruit_smoothie.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-3.jpg",
       isAvailable: true,
       deliverLater: false,
       createdAt: new Date().toISOString()
@@ -81,7 +83,7 @@ const INITIAL_DATA = {
       category: "Snacks",
       price: 180,
       description: "Golden-crisp sabudana and sweet potato tikkis served with fresh coriander-mint chutney. (Unit: Per Plate)",
-      imageUrl: "/images/menu/sabudana_tikki.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-4.jpg",
       isAvailable: true,
       deliverLater: false,
       createdAt: new Date().toISOString()
@@ -92,7 +94,7 @@ const INITIAL_DATA = {
       category: "Snacks",
       price: 180,
       description: "Crispy house-cut healthy fries tossed in aromatic peri-peri spices with house special dip. (Unit: Per Plate)",
-      imageUrl: "/images/menu/peri_peri_fries.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-5.jpg",
       isAvailable: true,
       deliverLater: false,
       createdAt: new Date().toISOString()
@@ -103,7 +105,7 @@ const INITIAL_DATA = {
       category: "Healthy Breakfast",
       price: 500,
       description: "Crunchy, tasty, snakable and great with milk. 100% natural, NO added sugar. (Unit: Per 100g)",
-      imageUrl: "/images/menu/muesli.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-6.jpg",
       isAvailable: true,
       createdAt: new Date().toISOString()
     },
@@ -113,7 +115,7 @@ const INITIAL_DATA = {
       category: "Kashmiri Dry Fruits",
       price: 1500,
       description: "100% Pure premium Kashmiri Almonds (Badam Giri), rich in natural oils and sweetness. (Unit: Per kg)",
-      imageUrl: "/images/menu/almonds.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-7.jpg",
       isAvailable: true,
       createdAt: new Date().toISOString()
     },
@@ -123,7 +125,7 @@ const INITIAL_DATA = {
       category: "Kashmiri Dry Fruits",
       price: 1800,
       description: "100% Pure jumbo Kashmiri Cashews (Kaju), naturally sweet, creamy, and crunchy. (Unit: Per kg)",
-      imageUrl: "/images/menu/cashews.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-8.jpg",
       isAvailable: true,
       createdAt: new Date().toISOString()
     },
@@ -133,7 +135,7 @@ const INITIAL_DATA = {
       category: "Kashmiri Dry Fruits",
       price: 1600,
       description: "100% Pure premium Kashmiri Walnut Kernels (Akhrot Giri), rich in Omega-3. (Unit: Per kg)",
-      imageUrl: "/images/menu/walnuts.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-9.jpg",
       isAvailable: true,
       createdAt: new Date().toISOString()
     },
@@ -143,7 +145,7 @@ const INITIAL_DATA = {
       category: "Kashmiri Dry Fruits",
       price: 1400,
       description: "Sun-dried handpicked pure Kashmiri Blackberries / Berries, rich in natural antioxidants. (Unit: Per kg)",
-      imageUrl: "/images/menu/blackberries.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-10.jpg",
       isAvailable: true,
       createdAt: new Date().toISOString()
     },
@@ -153,7 +155,7 @@ const INITIAL_DATA = {
       category: "Kashmiri Dry Fruits",
       price: 1650,
       description: "Premium bowl assortment of Kashmiri Almonds, Cashews, Walnuts, and Blackberries. (Unit: Per 1 kg Bowl)",
-      imageUrl: "/images/menu/dry_fruits.jpg",
+      imageUrl: "https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-11.jpg",
       isAvailable: true,
       deliverLater: false,
       createdAt: new Date().toISOString()
@@ -174,7 +176,13 @@ function normalizeDb(db) {
   if (!Array.isArray(db.products)) db.products = [];
   db.products = db.products.map((p) => ({
     ...p,
-    deliverLater: Boolean(p.deliverLater)
+    deliverLater: Boolean(p.deliverLater),
+    gstRate: Number(p.gstRate ?? 5)
+  }));
+  db.orders = db.orders.map((order) => ({
+    ...order,
+    subtotalAmount: Number(order.subtotalAmount ?? order.totalAmount ?? 0),
+    taxAmount: Number(order.taxAmount ?? 0)
   }));
   return db;
 }
@@ -287,6 +295,7 @@ export async function dbUpdateProduct(id, updates) {
   if (updates.imageUrl !== undefined) prod.imageUrl = updates.imageUrl.trim();
   if (updates.isAvailable !== undefined) prod.isAvailable = Boolean(updates.isAvailable);
   if (updates.deliverLater !== undefined) prod.deliverLater = Boolean(updates.deliverLater);
+  if (updates.gstRate !== undefined) prod.gstRate = Number(updates.gstRate);
   prod.updatedAt = new Date().toISOString();
   db.products[idx] = prod;
   saveDb(db);
@@ -490,6 +499,26 @@ export async function dbGetCheckoutById(id) {
   }
   const db = getDb();
   return db.checkouts.find(c => c.id === id) || null;
+}
+
+export async function dbGetCheckoutByRazorpayOrderId(razorpayOrderId) {
+  const orderId = String(razorpayOrderId || '').trim();
+  if (!orderId) return null;
+  if (isSupabaseActive()) {
+    return await fetchSupabaseCheckoutByRazorpayOrderId(orderId);
+  }
+  const db = getDb();
+  return db.checkouts.find(c => c.razorpayOrderId === orderId) || null;
+}
+
+export async function dbGetOrdersByRazorpayPaymentId(paymentId) {
+  const id = String(paymentId || '').trim();
+  if (!id) return [];
+  if (isSupabaseActive()) {
+    return await fetchSupabaseOrdersByRazorpayPaymentId(id);
+  }
+  const db = getDb();
+  return (db.orders || []).filter(o => o.razorpayPaymentId === id);
 }
 
 export async function dbUpdateCheckout(id, updates) {

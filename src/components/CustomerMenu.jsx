@@ -16,6 +16,8 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
+const FALLBACK_PRODUCT_IMAGE = 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-1.jpg';
+
 export default function CustomerMenu({ 
   products, 
   settings, 
@@ -107,9 +109,14 @@ export default function CustomerMenu({
   };
 
   const totalItemsCount = cart.reduce((sum, item) => sum + item.quantity, 0);
-  const totalCartAmount = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+  const roundMoney = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
+  const subtotalAmount = roundMoney(cart.reduce((sum, item) => sum + (item.price * item.quantity), 0));
+  const taxAmount = roundMoney(cart.reduce(
+    (sum, item) => sum + (item.price * item.quantity * Number(item.gstRate ?? 5) / 100),
+    0
+  ));
+  const totalCartAmount = roundMoney(subtotalAmount + taxAmount);
   const hasDeliverLater = cart.some((item) => item.deliverLater);
-  const razorpayEnabled = Boolean(settings.razorpayEnabled);
 
   const persistOrders = (orders) => {
     const storedOrders = JSON.parse(localStorage.getItem('my_orders') || '[]');
@@ -375,11 +382,11 @@ export default function CustomerMenu({
                     {/* Item Image */}
                     <div className="relative w-24 h-24 sm:w-28 sm:h-28 rounded-xl overflow-hidden shrink-0 bg-[#faf9f5] border border-[#e8e5dc]">
                       <img
-                        src={product.imageUrl || 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=400&q=80'}
+                        src={product.imageUrl || FALLBACK_PRODUCT_IMAGE}
                         alt={product.name}
                         className="w-full h-full object-cover"
                         onError={(e) => {
-                          e.target.src = 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=400&q=80';
+                          e.target.src = FALLBACK_PRODUCT_IMAGE;
                         }}
                       />
                       {!isAvailable && (
@@ -415,6 +422,9 @@ export default function CustomerMenu({
                       <div className="mt-3 flex items-center justify-between">
                         <span className="text-base font-black text-[#013e37]">
                           {currency}{product.price}
+                        </span>
+                        <span className="text-[10px] text-[#013e37]/55 ml-1">
+                          + {Number(product.gstRate ?? 5)}% GST
                         </span>
 
                         {/* Add to Cart / Qty Stepper */}
@@ -680,36 +690,9 @@ export default function CustomerMenu({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-[#013e37] mb-1">Pay</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setPaymentMethod('counter')}
-                      className={`py-2 rounded-xl text-xs font-bold border cursor-pointer ${
-                        paymentMethod === 'counter'
-                          ? 'bg-[#013e37] text-[#ffefb3] border-[#013e37]'
-                          : 'bg-white text-[#013e37] border-[#e8e5dc]'
-                      }`}
-                    >
-                      Pay at counter
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!razorpayEnabled) {
-                          setErrorMessage('Online payments are not configured yet.');
-                          return;
-                        }
-                        setPaymentMethod('online');
-                      }}
-                      className={`py-2 rounded-xl text-xs font-bold border cursor-pointer ${
-                        paymentMethod === 'online'
-                          ? 'bg-[#013e37] text-[#ffefb3] border-[#013e37]'
-                          : 'bg-white text-[#013e37] border-[#e8e5dc]'
-                      }`}
-                    >
-                      Pay online
-                    </button>
+                  <label className="block text-xs font-bold text-[#013e37] mb-1">Payment</label>
+                  <div className="py-2 px-3 rounded-xl text-xs font-bold border bg-[#013e37] text-[#ffefb3] border-[#013e37]">
+                    Pay at counter or by UPI after placing the order
                   </div>
                   {!currentUser && (
                     <button
@@ -734,16 +717,18 @@ export default function CustomerMenu({
               <div className="pt-2 border-t border-[#e8e5dc] space-y-1 text-xs">
                 <div className="flex justify-between text-[#013e37]/70">
                   <span>Subtotal</span>
-                  <span>{currency}{totalCartAmount}</span>
+                  <span>{currency}{subtotalAmount.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-[#013e37]/70">
+                  <span>GST</span>
+                  <span>{currency}{taxAmount.toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between text-base font-black text-[#013e37] pt-1">
                   <span>Total Due</span>
-                  <span>{currency}{totalCartAmount}</span>
+                  <span>{currency}{totalCartAmount.toFixed(2)}</span>
                 </div>
                 <p className="text-[11px] text-[#013e37]/60 text-center pt-0.5">
-                  {paymentMethod === 'online'
-                    ? 'Pay securely with Razorpay'
-                    : 'Pay at counter (Cash / UPI / Card accepted)'}
+                  Pay at the counter or use any UPI app after ordering
                 </p>
               </div>
 
@@ -759,7 +744,7 @@ export default function CustomerMenu({
                 ) : (
                   <>
                     <CheckCircle2 size={16} />
-                    <span>{checkoutStep === 'address' ? 'Save address & place order' : paymentMethod === 'online' ? `Pay ${currency}${totalCartAmount}` : `Confirm Order (${currency}${totalCartAmount})`}</span>
+                    <span>{checkoutStep === 'address' ? 'Save address & place order' : `Pay at Counter (${currency}${totalCartAmount.toFixed(2)})`}</span>
                   </>
                 )}
               </button>

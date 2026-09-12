@@ -1,6 +1,7 @@
 import assert from 'assert';
+import crypto from 'crypto';
 
-const BASE_URL = 'http://127.0.0.1:5001';
+const BASE_URL = `http://127.0.0.1:${process.env.PORT || 5001}`;
 const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
 
 async function runSecurityTests() {
@@ -250,6 +251,141 @@ async function runSecurityTests() {
   });
   assert.strictEqual(kitchenShip.status, 400, 'Kitchen orders cannot use delivery statuses');
   console.log('   🔒 Weak signup, bad login, fake payment, and illegal status blocked');
+
+  console.log('\n12b. Razorpay webhooks must reject bad HMAC and still fulfill captured payments...');
+  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || 'test-webhook-secret';
+  const signWebhook = (payload) => crypto
+    .createHmac('sha256', webhookSecret)
+    .update(JSON.stringify(payload))
+    .digest('hex');
+
+  const badWebhook = await fetch(`${BASE_URL}/api/webhooks/razorpay`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Razorpay-Signature': 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+    },
+    body: JSON.stringify({ event: 'payment.captured', payload: {} })
+  });
+  assert.strictEqual(badWebhook.status, 400, 'Unsigned webhooks must be rejected');
+
+  const prepareOnline = await fetch(`${BASE_URL}/api/checkout/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customerName: 'Webhook Guest',
+      customerPhone: '+919700044455',
+      items: [{ id: testProdId, quantity: 1 }],
+      paymentMethod: 'online'
+    })
+  });
+  assert.strictEqual(prepareOnline.status, 200);
+  const onlineCheckout = await prepareOnline.json();
+  const payId = 'pay_webhook_captured_1';
+  const capturedPayload = {
+    event: 'payment.captured',
+    payload: {
+      payment: {
+        entity: {
+          id: payId,
+          order_id: onlineCheckout.razorpayOrderId,
+          amount: Math.round(Number(onlineCheckout.amount) * 100),
+          status: 'captured',
+          captured: true,
+          notes: { checkoutId: onlineCheckout.checkoutId }
+        }
+      }
+    }
+  };
+  const capturedRes = await fetch(`${BASE_URL}/api/webhooks/razorpay`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Razorpay-Signature': signWebhook(capturedPayload)
+    },
+    body: JSON.stringify(capturedPayload)
+  });
+  assert.strictEqual(capturedRes.status, 200);
+  const capturedBody = await capturedRes.json();
+  assert.strictEqual(capturedBody.status, 'completed');
+  assert.ok(capturedBody.orderCount >= 1);
+
+  const replayRes = await fetch(`${BASE_URL}/api/webhooks/razorpay`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Razorpay-Signature': signWebhook(capturedPayload)
+    },
+    body: JSON.stringify(capturedPayload)
+  });
+  assert.strictEqual(replayRes.status, 200);
+  const replayBody = await replayRes.json();
+  assert.ok(replayBody.alreadyCompleted || replayBody.orderCount === capturedBody.orderCount);
+
+  const refundPayload = {
+    event: 'refund.processed',
+    payload: {
+      refund: { entity: { id: 'rfnd_webhook_1', payment_id: payId, amount: capturedPayload.payload.payment.entity.amount, status: 'processed' } }
+    }
+  };
+  const refundRes = await fetch(`${BASE_URL}/api/webhooks/razorpay`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Razorpay-Signature': signWebhook(refundPayload)
+    },
+    body: JSON.stringify(refundPayload)
+  });
+  assert.strictEqual(refundRes.status, 200);
+  const refundedOrders = await fetch(`${BASE_URL}/api/orders`, {
+    headers: { 'x-admin-pin': session }
+  });
+  const refundedList = await refundedOrders.json();
+  const refunded = refundedList.find(o => o.razorpayPaymentId === payId);
+  assert.ok(refunded);
+  assert.strictEqual(refunded.paymentStatus, 'refunded');
+  assert.strictEqual(refunded.status, 'refunded');
+
+  const failPrepare = await fetch(`${BASE_URL}/api/checkout/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customerName: 'Failed Pay Guest',
+      customerPhone: '+919700044466',
+      items: [{ id: testProdId, quantity: 1 }],
+      paymentMethod: 'online'
+    })
+  });
+  const failCheckout = await failPrepare.json();
+  const failPayload = {
+    event: 'payment.failed',
+    payload: {
+      payment: {
+        entity: {
+          id: 'pay_webhook_failed_1',
+          order_id: failCheckout.razorpayOrderId,
+          status: 'failed',
+          notes: { checkoutId: failCheckout.checkoutId }
+        }
+      }
+    }
+  };
+  const failWh = await fetch(`${BASE_URL}/api/webhooks/razorpay`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Razorpay-Signature': signWebhook(failPayload)
+    },
+    body: JSON.stringify(failPayload)
+  });
+  assert.strictEqual(failWh.status, 200);
+  const completeFailed = await fetch(`${BASE_URL}/api/checkout/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ checkoutId: failCheckout.checkoutId })
+  });
+  assert.strictEqual(completeFailed.status, 400);
+  console.log('   🔒 Webhook HMAC required; captured/refund/failed edge cases handled');
 
   console.log('\n13. Backdoor Test: the old PIN must stop working after a PIN change...');
   const rotatedPin = 'rotated-pin-9182';

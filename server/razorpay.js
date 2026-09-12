@@ -42,6 +42,25 @@ export async function createRazorpayOrder({ amountPaise, receipt, notes }) {
   return data;
 }
 
+export function verifyRazorpayWebhookSignature(rawBody, signature) {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret || !signature || rawBody == null) return false;
+  const payload = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody));
+  const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  try {
+    const a = Buffer.from(expected);
+    const b = Buffer.from(String(signature));
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+export function isRazorpayWebhookConfigured() {
+  return Boolean(process.env.RAZORPAY_WEBHOOK_SECRET);
+}
+
 export function verifyRazorpaySignature({ orderId, paymentId, signature }) {
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
   if (!keySecret || !orderId || !paymentId || !signature) return false;

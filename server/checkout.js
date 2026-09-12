@@ -1,5 +1,13 @@
 import crypto from 'crypto';
-import { dbGetProducts, dbCreateOrder, generateOrderAccessToken, dbGetSettings } from './db.js';
+import {
+  dbGetProducts,
+  dbCreateOrder,
+  generateOrderAccessToken,
+  dbGetSettings,
+  dbUpdateCheckout,
+  dbGetOrdersByRazorpayPaymentId
+} from './db.js';
+import { calculateLineTax, roundMoney } from './tax.js';
 
 export function cleanPhoneNumber(raw) {
   const cleanPhone = String(raw || '').trim().replace(/[^\d+]/g, '');
@@ -38,6 +46,8 @@ export async function verifyCartItems(items) {
 
   const products = await dbGetProducts();
   const productMap = new Map(products.map(p => [p.id, p]));
+  let calculatedSubtotal = 0;
+  let calculatedTax = 0;
   let calculatedTotal = 0;
   const verifiedItems = [];
 
@@ -59,8 +69,10 @@ export async function verifyCartItems(items) {
       throw err;
     }
     const qty = Math.max(1, Math.min(50, parseInt(item.quantity, 10) || 1));
-    const subtotal = prod.price * qty;
-    calculatedTotal += subtotal;
+    const line = calculateLineTax(prod.price, qty, prod.gstRate);
+    calculatedSubtotal += line.baseAmount;
+    calculatedTax += line.taxAmount;
+    calculatedTotal += line.totalAmount;
     verifiedItems.push({
       id: prod.id,
       name: prod.name,
@@ -69,11 +81,19 @@ export async function verifyCartItems(items) {
       category: prod.category,
       imageUrl: prod.imageUrl,
       deliverLater: Boolean(prod.deliverLater),
-      subtotal
+      gstRate: line.taxRate,
+      baseAmount: line.baseAmount,
+      taxAmount: line.taxAmount,
+      subtotal: line.totalAmount
     });
   }
 
-  return { verifiedItems, calculatedTotal };
+  return {
+    verifiedItems,
+    calculatedSubtotal: roundMoney(calculatedSubtotal),
+    calculatedTax: roundMoney(calculatedTax),
+    calculatedTotal: roundMoney(calculatedTotal)
+  };
 }
 
 export function splitVerifiedItems(verifiedItems) {
@@ -96,10 +116,15 @@ export async function createSplitOrders({
   paymentStatus,
   razorpayOrderId,
   razorpayPaymentId,
-  deliveryAddress
+  deliveryAddress,
+  only = 'all',
+  paymentGroupId: existingGroupId
 }) {
   const { immediateItems, deliveryItems } = splitVerifiedItems(verifiedItems);
-  if (deliveryItems.length > 0 && !deliveryAddress) {
+  const includeImmediate = only === 'all' || only === 'immediate';
+  const includeDelivery = only === 'all' || only === 'delivery';
+
+  if (includeDelivery && deliveryItems.length > 0 && !deliveryAddress) {
     const err = new Error('Delivery address is required for deliver-later items.');
     err.status = 400;
     err.code = 'NEEDS_DELIVERY_ADDRESS';
@@ -107,7 +132,7 @@ export async function createSplitOrders({
   }
 
   const settings = await dbGetSettings();
-  const paymentGroupId = `pay-${crypto.randomUUID()}`;
+  const paymentGroupId = existingGroupId || `pay-${crypto.randomUUID()}`;
   const now = new Date().toISOString();
   const created = [];
 
@@ -126,13 +151,17 @@ export async function createSplitOrders({
     updatedAt: now
   };
 
-  if (immediateItems.length > 0) {
-    const totalAmount = immediateItems.reduce((sum, i) => sum + i.subtotal, 0);
+  if (includeImmediate && immediateItems.length > 0) {
+    const subtotalAmount = roundMoney(immediateItems.reduce((sum, i) => sum + i.baseAmount, 0));
+    const taxAmount = roundMoney(immediateItems.reduce((sum, i) => sum + i.taxAmount, 0));
+    const totalAmount = roundMoney(subtotalAmount + taxAmount);
     const immediatePaid = paymentStatus === 'paid';
     created.push(await dbCreateOrder({
       ...base,
       id: `ord-${crypto.randomUUID()}`,
       items: immediateItems,
+      subtotalAmount,
+      taxAmount,
       totalAmount,
       status: immediatePaid ? 'preparing' : 'pending',
       fulfillmentType: 'immediate',
@@ -142,12 +171,16 @@ export async function createSplitOrders({
     }));
   }
 
-  if (deliveryItems.length > 0) {
-    const totalAmount = deliveryItems.reduce((sum, i) => sum + i.subtotal, 0);
+  if (includeDelivery && deliveryItems.length > 0) {
+    const subtotalAmount = roundMoney(deliveryItems.reduce((sum, i) => sum + i.baseAmount, 0));
+    const taxAmount = roundMoney(deliveryItems.reduce((sum, i) => sum + i.taxAmount, 0));
+    const totalAmount = roundMoney(subtotalAmount + taxAmount);
     created.push(await dbCreateOrder({
       ...base,
       id: `ord-${crypto.randomUUID()}`,
       items: deliveryItems,
+      subtotalAmount,
+      taxAmount,
       totalAmount,
       status: 'pending',
       fulfillmentType: 'delivery',
@@ -158,4 +191,80 @@ export async function createSplitOrders({
   }
 
   return created;
+}
+
+export async function fulfillPaidCheckout(checkout, { paymentId, deliveryAddress, allowMissingDeliveryAddress = false }) {
+  const fromCheckout = Array.isArray(checkout.createdOrders) ? checkout.createdOrders : [];
+  const fromPayment = paymentId ? await dbGetOrdersByRazorpayPaymentId(paymentId) : [];
+  const merged = new Map();
+  for (const order of [...fromCheckout, ...fromPayment]) {
+    if (order?.id) merged.set(order.id, order);
+  }
+  let created = [...merged.values()];
+
+  if (checkout.status === 'completed' && created.length) {
+    return { checkout, orders: created, alreadyCompleted: true };
+  }
+
+  const address = deliveryAddress || checkout.deliveryAddress || null;
+  const hasImmediate = checkout.items.some((item) => !item.deliverLater);
+  const hasDelivery = checkout.items.some((item) => item.deliverLater);
+  const alreadyImmediate = created.some((o) => o.fulfillmentType === 'immediate');
+  const alreadyDelivery = created.some((o) => o.fulfillmentType === 'delivery');
+  const paymentGroupId = created.find((o) => o.paymentGroupId)?.paymentGroupId;
+
+  if (hasImmediate && !alreadyImmediate) {
+    created = created.concat(await createSplitOrders({
+      verifiedItems: checkout.items,
+      customerName: checkout.customerName,
+      customerPhone: checkout.customerPhone,
+      notes: checkout.notes,
+      userId: checkout.userId || null,
+      paymentMethod: checkout.paymentMethod,
+      paymentStatus: 'paid',
+      razorpayOrderId: checkout.razorpayOrderId || '',
+      razorpayPaymentId: paymentId,
+      deliveryAddress: address,
+      only: 'immediate',
+      paymentGroupId
+    }));
+  }
+
+  if (hasDelivery && !alreadyDelivery) {
+    if (!address) {
+      if (!allowMissingDeliveryAddress) {
+        const err = new Error('Delivery address is required for deliver-later items.');
+        err.status = 400;
+        err.code = 'NEEDS_DELIVERY_ADDRESS';
+        throw err;
+      }
+    } else {
+      created = created.concat(await createSplitOrders({
+        verifiedItems: checkout.items,
+        customerName: checkout.customerName,
+        customerPhone: checkout.customerPhone,
+        notes: checkout.notes,
+        userId: checkout.userId || null,
+        paymentMethod: checkout.paymentMethod,
+        paymentStatus: 'paid',
+        razorpayOrderId: checkout.razorpayOrderId || '',
+        razorpayPaymentId: paymentId,
+        deliveryAddress: address,
+        only: 'delivery',
+        paymentGroupId: created.find((o) => o.paymentGroupId)?.paymentGroupId || paymentGroupId
+      }));
+    }
+  }
+
+  const deliveryStillPending = hasDelivery && !created.some((o) => o.fulfillmentType === 'delivery');
+  const status = deliveryStillPending ? 'paid' : 'completed';
+
+  const updated = await dbUpdateCheckout(checkout.id, {
+    status,
+    razorpayPaymentId: paymentId || checkout.razorpayPaymentId || '',
+    deliveryAddress: address,
+    createdOrders: created
+  });
+
+  return { checkout: updated, orders: created, alreadyCompleted: false };
 }

@@ -34,7 +34,9 @@ async function main() {
       ...process.env,
       NODE_ENV: 'test',
       PORT: port,
-      ADMIN_PIN: process.env.ADMIN_PIN || '1234',
+      ADMIN_USERNAME: process.env.ADMIN_USERNAME || 'spoonadmin',
+      ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'test-admin-password',
+      ADMIN_SESSION_SECRET: process.env.ADMIN_SESSION_SECRET || 'test-admin-session-secret-at-least-32-chars',
       SUPABASE_URL: '',
       SUPABASE_SERVICE_ROLE_KEY: '',
       SUPABASE_ANON_KEY: '',
@@ -53,7 +55,7 @@ async function main() {
   process.on('exit', cleanup);
 
   try {
-    await waitForServer(`http://127.0.0.1:${port}/api/settings`);
+    await waitForServer(`http://127.0.0.1:${port}/api/health`);
     console.log(`✓ Server is live and responding on port ${port}.\n`);
 
     console.log('====================================================');

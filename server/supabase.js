@@ -1,16 +1,26 @@
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import { escapeLikePattern } from './security.js';
 dotenv.config({ override: false });
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_TIMEOUT_MS = 10000;
+const UNIQUE_VIOLATION = '23505';
 
 let supabase = null;
+
+// Every PostgREST call gets a hard timeout so a slow database cannot pin a request
+// until the platform kills it.
+function fetchWithTimeout(url, options = {}) {
+  return fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(SUPABASE_TIMEOUT_MS) });
+}
 
 if (supabaseUrl && supabaseKey && !supabaseUrl.includes('your-project-id')) {
   try {
     supabase = createClient(supabaseUrl, supabaseKey, {
-      auth: { persistSession: false }
+      auth: { persistSession: false },
+      global: { fetch: fetchWithTimeout }
     });
     console.log('⚡ Connected to Supabase PostgreSQL at:', supabaseUrl);
   } catch (err) {
@@ -24,19 +34,24 @@ export function isSupabaseActive() {
   return Boolean(supabase);
 }
 
-export async function fetchSupabaseSettings() {
-  if (!supabase) return null;
-  const { data, error } = await supabase.from('settings').select('*').eq('id', 1).single();
-  if (error) {
-    console.warn('Supabase fetch settings error:', error.message);
-    return null;
-  }
+function mapSupabaseSettings(data) {
   return {
     eventName: data.event_name,
     currencySymbol: data.currency_symbol,
-    adminPin: data.admin_pin,
-    counterName: data.counter_name
+    adminUsername: data.admin_username || '',
+    adminPassword: data.admin_password || '',
+    counterName: data.counter_name,
+    upiId: data.upi_id || '',
+    upiPhone: data.upi_phone || ''
   };
+}
+
+export async function fetchSupabaseSettings() {
+  if (!supabase) return null;
+  const { data, error } = await supabase.from('settings').select('*').eq('id', 1).single();
+  // A failure here must surface, not silently fall back to a different settings store.
+  if (error) throw error;
+  return mapSupabaseSettings(data);
 }
 
 export async function updateSupabaseSettings(updates) {
@@ -44,8 +59,11 @@ export async function updateSupabaseSettings(updates) {
   const payload = { updated_at: new Date().toISOString() };
   if (updates.eventName) payload.event_name = updates.eventName;
   if (updates.currencySymbol) payload.currency_symbol = updates.currencySymbol;
-  if (updates.adminPin) payload.admin_pin = updates.adminPin;
+  if (updates.adminUsername) payload.admin_username = updates.adminUsername;
+  if (updates.adminPassword) payload.admin_password = updates.adminPassword;
   if (updates.counterName) payload.counter_name = updates.counterName;
+  if (updates.upiId !== undefined) payload.upi_id = updates.upiId;
+  if (updates.upiPhone !== undefined) payload.upi_phone = updates.upiPhone;
 
   const { data, error } = await supabase
     .from('settings')
@@ -55,12 +73,7 @@ export async function updateSupabaseSettings(updates) {
     .single();
 
   if (error) throw error;
-  return {
-    eventName: data.event_name,
-    currencySymbol: data.currency_symbol,
-    adminPin: data.admin_pin,
-    counterName: data.counter_name
-  };
+  return mapSupabaseSettings(data);
 }
 
 function mapSupabaseProduct(p) {
@@ -170,12 +183,26 @@ function mapSupabaseOrder(data) {
   };
 }
 
-export async function fetchSupabaseOrders() {
+export async function fetchSupabaseOrders({ limit = 500, since = null } = {}) {
   if (!supabase) return null;
+  let query = supabase
+    .from('orders')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (since) query = query.gte('updated_at', since);
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data || []).map(mapSupabaseOrder);
+}
+
+export async function fetchSupabaseOrdersByIds(ids) {
+  if (!supabase) return [];
   const { data, error } = await supabase
     .from('orders')
     .select('*')
-    .order('created_at', { ascending: false });
+    .in('id', ids)
+    .order('created_at', { ascending: true });
   if (error) throw error;
   return (data || []).map(mapSupabaseOrder);
 }
@@ -236,7 +263,16 @@ export async function insertSupabaseOrder(order) {
     }])
     .select()
     .single();
-  if (error) throw error;
+  if (error) {
+    // The partial unique index on (razorpay_payment_id, fulfillment_type) means a
+    // concurrent worker already created this order: return theirs instead of failing.
+    if (error.code === UNIQUE_VIOLATION && order.razorpayPaymentId) {
+      const existing = await fetchSupabaseOrdersByRazorpayPaymentId(order.razorpayPaymentId);
+      const match = existing.find(o => o.fulfillmentType === (order.fulfillmentType || 'immediate'));
+      if (match) return match;
+    }
+    throw error;
+  }
   return mapSupabaseOrder(data);
 }
 
@@ -309,7 +345,7 @@ export async function fetchSupabaseUserByUsername(username) {
   const { data, error } = await supabase
     .from('users')
     .select('*')
-    .ilike('username', username)
+    .ilike('username', escapeLikePattern(username))
     .maybeSingle();
   if (error) throw error;
   return mapSupabaseUser(data);
@@ -320,7 +356,7 @@ export async function fetchSupabaseUserByEmail(email) {
   const { data, error } = await supabase
     .from('users')
     .select('*')
-    .ilike('email', email)
+    .ilike('email', escapeLikePattern(email))
     .maybeSingle();
   if (error) throw error;
   return mapSupabaseUser(data);
@@ -358,6 +394,16 @@ export async function fetchSupabaseUserSession(token) {
   if (error) throw error;
   if (!data) return null;
   return { token: data.token, userId: data.user_id, expiresAt: data.expires_at };
+}
+
+export async function deleteExpiredSupabaseUserSessions(nowIso) {
+  if (!supabase) return 0;
+  const { error, count } = await supabase
+    .from('user_sessions')
+    .delete({ count: 'exact' })
+    .lt('expires_at', nowIso);
+  if (error) throw error;
+  return count || 0;
 }
 
 export async function deleteSupabaseUserSession(token) {
@@ -450,6 +496,19 @@ export async function fetchSupabaseOrdersByRazorpayPaymentId(paymentId) {
     .order('created_at', { ascending: true });
   if (error) throw error;
   return (data || []).map(mapSupabaseOrder);
+}
+
+export async function claimSupabaseCheckout(id, fromStatuses, toStatus) {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('checkouts')
+    .update({ status: toStatus, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .in('status', fromStatuses)
+    .select()
+    .maybeSingle();
+  if (error) throw error;
+  return mapSupabaseCheckout(data);
 }
 
 export async function updateSupabaseCheckout(id, updates) {

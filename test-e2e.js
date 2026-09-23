@@ -1,10 +1,25 @@
 import assert from 'assert';
 
 const BASE_URL = `http://127.0.0.1:${process.env.PORT || 5001}`;
-const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'spoonadmin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'test-admin-password';
+
+// Protected routes only accept a session token issued by /api/admin/login.
+async function adminLogin() {
+  const res = await fetch(`${BASE_URL}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD })
+  });
+  assert.strictEqual(res.status, 200, 'Admin login must succeed with the configured credentials');
+  const data = await res.json();
+  assert.ok(data.token && data.token.startsWith('adm_'));
+  return data.token;
+}
 
 async function runTests() {
   console.log('🚀 Running Comprehensive Event Order System Tests...\n');
+  const ADMIN_TOKEN = await adminLogin();
 
   // 1. Check Settings
   console.log('1. Testing GET /api/settings...');
@@ -70,7 +85,7 @@ async function runTests() {
   // Pending -> Preparing
   let statusRes = await fetch(`${BASE_URL}/api/orders/${order.id}/status`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
     body: JSON.stringify({ status: 'preparing' })
   });
   assert.strictEqual(statusRes.status, 200);
@@ -81,7 +96,7 @@ async function runTests() {
   // Preparing -> Ready
   statusRes = await fetch(`${BASE_URL}/api/orders/${order.id}/status`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
     body: JSON.stringify({ status: 'ready' })
   });
   assert.strictEqual(statusRes.status, 200);
@@ -101,7 +116,7 @@ async function runTests() {
   // 7. Ready -> Completed
   statusRes = await fetch(`${BASE_URL}/api/orders/${order.id}/status`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
     body: JSON.stringify({ status: 'completed' })
   });
   assert.strictEqual(statusRes.status, 200);
@@ -113,7 +128,7 @@ async function runTests() {
   console.log('\n6. Testing Admin Product CRUD (Add & Toggle Stock)...');
   const newProductRes = await fetch(`${BASE_URL}/api/products`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
     body: JSON.stringify({
       name: 'Loaded Nachos',
       category: 'Snacks',
@@ -129,7 +144,7 @@ async function runTests() {
   // Toggle out of stock
   const toggleRes = await fetch(`${BASE_URL}/api/products/${newProd.id}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
     body: JSON.stringify({ isAvailable: false })
   });
   assert.strictEqual(toggleRes.status, 200);
@@ -140,7 +155,7 @@ async function runTests() {
   // 9. Check Stats & CSV Export
   console.log('\n7. Testing Admin Analytics & CSV Export...');
   const statsRes = await fetch(`${BASE_URL}/api/stats`, {
-    headers: { 'x-admin-pin': ADMIN_PIN }
+    headers: { 'x-admin-token': ADMIN_TOKEN }
   });
   assert.strictEqual(statsRes.status, 200);
   const stats = await statsRes.json();
@@ -150,7 +165,7 @@ async function runTests() {
   console.log(`   ✓ Stats: Total Orders: ${stats.totalOrders}, Revenue: ₹${stats.totalRevenue}`);
 
   const csvRes = await fetch(`${BASE_URL}/api/orders/export/csv`, {
-    headers: { 'x-admin-pin': ADMIN_PIN }
+    headers: { 'x-admin-token': ADMIN_TOKEN }
   });
   assert.strictEqual(csvRes.status, 200);
   const csvText = await csvRes.text();
@@ -217,7 +232,7 @@ async function runTests() {
 
   const laterProdRes = await fetch(`${BASE_URL}/api/products`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
     body: JSON.stringify({
       name: 'Event Hamper',
       category: 'Merchandise',
@@ -257,7 +272,7 @@ async function runTests() {
 
   const shipRes = await fetch(`${BASE_URL}/api/orders/${delivery.id}/status`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
     body: JSON.stringify({ status: 'shipped', trackingLink: 'https://example.com/track/1' })
   });
   assert.strictEqual(shipRes.status, 200);

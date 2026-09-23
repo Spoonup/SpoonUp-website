@@ -28,7 +28,10 @@ import {
   fetchSupabaseCheckoutById,
   fetchSupabaseCheckoutByRazorpayOrderId,
   updateSupabaseCheckout,
-  fetchSupabaseOrdersByRazorpayPaymentId
+  fetchSupabaseOrdersByRazorpayPaymentId,
+  fetchSupabaseOrdersByIds,
+  deleteExpiredSupabaseUserSessions,
+  claimSupabaseCheckout
 } from './supabase.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,12 +39,22 @@ const __dirname = path.dirname(__filename);
 const DB_PATH = path.join(__dirname, '..', 'data', 'db.json');
 const DATA_DIR = path.dirname(DB_PATH);
 
+const CREDENTIAL_PLACEHOLDER = 'CHANGE_ME';
+const DEFAULT_ADMIN_USERNAME = 'admin';
+
+function bootstrapAdminUsername() {
+  return String(process.env.ADMIN_USERNAME || DEFAULT_ADMIN_USERNAME).trim();
+}
+
 const INITIAL_DATA = {
   settings: {
     eventName: "SpoonUp",
     currencySymbol: "₹",
-    adminPin: hashPassword(process.env.ADMIN_PIN || "1234"),
-    counterName: "Main Shop"
+    // adminUsername / adminPassword are filled by persistHashedAdminCredential on
+    // first read, so no scrypt or credential generation happens at module load.
+    counterName: "Main Shop",
+    upiId: "",
+    upiPhone: ""
   },
   products: [
     {
@@ -169,6 +182,10 @@ const INITIAL_DATA = {
 };
 
 function normalizeDb(db) {
+  db.settings = { upiId: '', upiPhone: '', ...(db.settings || {}) };
+  // Local databases written by the old PIN scheme: drop the dead field so it can
+  // never be mistaken for a live credential.
+  delete db.settings.adminPin;
   if (!Array.isArray(db.users)) db.users = [];
   if (!Array.isArray(db.userSessions)) db.userSessions = [];
   if (!Array.isArray(db.checkouts)) db.checkouts = [];
@@ -212,20 +229,55 @@ export function saveDb(data) {
 }
 
 /**
- * The stored PIN is hashed on first read. While it is still plaintext (fresh install,
- * or the `CHANGE_ME` schema placeholder) an `ADMIN_PIN` from the environment wins, which
- * is the supported way to bootstrap or reset the staff PIN. Once hashed, only the
- * Settings screen can change it — the environment is not a permanent second credential.
+ * The stored admin password is hashed on first read. While it is still plaintext
+ * (fresh install, or the `CHANGE_ME` schema placeholder) `ADMIN_PASSWORD` from the
+ * environment wins, which is the supported way to bootstrap or reset the credential.
+ * Once hashed, only the Settings screen can change it — the environment is not a
+ * permanent second credential.
+ *
+ * Databases created under the old PIN scheme have no password yet; ADMIN_PASSWORD
+ * must be supplied once to migrate them. The old `adminPin` value is never promoted
+ * to a password, because a 6-digit PIN is not an acceptable password.
  */
-async function persistHashedPinIfNeeded(settings) {
-  if (!settings?.adminPin || isHashedSecret(settings.adminPin)) {
-    return settings;
+async function persistHashedAdminCredential(settings) {
+  if (!settings) return settings;
+
+  const updates = {};
+  if (!settings.adminUsername) {
+    updates.adminUsername = bootstrapAdminUsername();
   }
-  const bootstrapPin = process.env.ADMIN_PIN || String(settings.adminPin);
+
+  const storedPassword = settings.adminPassword ? String(settings.adminPassword) : '';
+  const needsPassword = !storedPassword || storedPassword === CREDENTIAL_PLACEHOLDER;
+
+  if (needsPassword && !process.env.ADMIN_PASSWORD) {
+    // A real (Supabase) database must never invent its own credential silently.
+    if (isSupabaseActive()) {
+      const err = new Error(
+        'Admin password is not set. Set ADMIN_PASSWORD once to bootstrap the staff login, then change it from Settings.'
+      );
+      err.status = 503;
+      throw err;
+    }
+    // Local development: generate once and print it, so there is no default password.
+    const generated = crypto.randomBytes(9).toString('base64url');
+    console.warn(
+      `⚠️ ADMIN_PASSWORD is not set. Generated a one-time staff password for this local database: ${generated}`
+    );
+    updates.adminPassword = await hashPassword(generated);
+  } else if (needsPassword) {
+    updates.adminPassword = await hashPassword(String(process.env.ADMIN_PASSWORD));
+  } else if (!isHashedSecret(storedPassword)) {
+    updates.adminPassword = await hashPassword(process.env.ADMIN_PASSWORD || storedPassword);
+  }
+
+  if (!Object.keys(updates).length) return settings;
+
   try {
-    return await dbUpdateSettings({ adminPin: hashPassword(bootstrapPin) });
+    return await dbUpdateSettings(updates);
   } catch (err) {
-    console.warn('Could not migrate admin PIN to salted hash:', err.message);
+    if (err.status) throw err;
+    console.warn('Could not migrate admin credential to salted hash:', err.message);
     return settings;
   }
 }
@@ -240,23 +292,24 @@ export function generateOrderAccessToken() {
 // Settings
 export async function dbGetSettings() {
   if (isSupabaseActive()) {
-    const s = await fetchSupabaseSettings();
-    if (s) return persistHashedPinIfNeeded(s);
+    return persistHashedAdminCredential(await fetchSupabaseSettings());
   }
   const local = getDb();
-  return persistHashedPinIfNeeded(local.settings);
+  return persistHashedAdminCredential(local.settings);
 }
 
 export async function dbUpdateSettings(updates) {
   if (isSupabaseActive()) {
-    const s = await updateSupabaseSettings(updates);
-    if (s) return s;
+    return await updateSupabaseSettings(updates);
   }
   const db = getDb();
   if (updates.eventName) db.settings.eventName = updates.eventName.trim();
   if (updates.currencySymbol) db.settings.currencySymbol = updates.currencySymbol.trim();
-  if (updates.adminPin) db.settings.adminPin = updates.adminPin.trim();
+  if (updates.adminUsername) db.settings.adminUsername = updates.adminUsername.trim();
+  if (updates.adminPassword) db.settings.adminPassword = updates.adminPassword.trim();
   if (updates.counterName) db.settings.counterName = updates.counterName.trim();
+  if (updates.upiId !== undefined) db.settings.upiId = String(updates.upiId).trim();
+  if (updates.upiPhone !== undefined) db.settings.upiPhone = String(updates.upiPhone).trim();
   saveDb(db);
   return db.settings;
 }
@@ -315,12 +368,35 @@ export async function dbDeleteProduct(id) {
 }
 
 // Orders
-export async function dbGetOrders() {
+export const DEFAULT_ORDER_LIMIT = 500;
+export const MAX_ORDER_LIMIT = 1000;
+
+/**
+ * Newest-first order list. `limit` caps the rows returned (admin screens poll this
+ * every few seconds, so it must not grow with the lifetime of the shop) and `since`
+ * (ISO timestamp) returns only orders updated at or after that instant.
+ */
+export async function dbGetOrders({ limit = DEFAULT_ORDER_LIMIT, since = null } = {}) {
+  const safeLimit = Math.max(1, Math.min(MAX_ORDER_LIMIT, Number(limit) || DEFAULT_ORDER_LIMIT));
   if (isSupabaseActive()) {
-    return await fetchSupabaseOrders();
+    return await fetchSupabaseOrders({ limit: safeLimit, since });
   }
   const db = getDb();
-  return [...(db.orders || [])].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const sinceMs = since ? new Date(since).getTime() : 0;
+  return [...(db.orders || [])]
+    .filter(o => !sinceMs || new Date(o.updatedAt || o.createdAt).getTime() >= sinceMs)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .slice(0, safeLimit);
+}
+
+export async function dbGetOrdersByIds(ids) {
+  const wanted = Array.from(new Set((ids || []).map(String).filter(Boolean)));
+  if (!wanted.length) return [];
+  if (isSupabaseActive()) {
+    return await fetchSupabaseOrdersByIds(wanted);
+  }
+  const db = getDb();
+  return (db.orders || []).filter(o => wanted.includes(o.id));
 }
 
 export async function dbGetOrderById(id) {
@@ -473,6 +549,19 @@ export async function dbGetUserBySessionToken(token) {
   return dbGetUserById(session.userId);
 }
 
+// Called on login so expired rows never accumulate indefinitely.
+export async function dbDeleteExpiredUserSessions() {
+  const now = new Date().toISOString();
+  if (isSupabaseActive()) {
+    return await deleteExpiredSupabaseUserSessions(now);
+  }
+  const db = getDb();
+  const before = db.userSessions.length;
+  db.userSessions = db.userSessions.filter(s => s.expiresAt >= now);
+  if (db.userSessions.length !== before) saveDb(db);
+  return before - db.userSessions.length;
+}
+
 export async function dbDeleteUserSession(token) {
   if (isSupabaseActive()) {
     return await deleteSupabaseUserSession(token);
@@ -519,6 +608,24 @@ export async function dbGetOrdersByRazorpayPaymentId(paymentId) {
   }
   const db = getDb();
   return (db.orders || []).filter(o => o.razorpayPaymentId === id);
+}
+
+/**
+ * Atomically moves a checkout from one of `fromStatuses` to `toStatus`.
+ * Returns the claimed checkout, or null when another worker already claimed it.
+ * This is the lock that stops the webhook and the client from both fulfilling
+ * the same payment.
+ */
+export async function dbClaimCheckout(id, fromStatuses, toStatus) {
+  if (isSupabaseActive()) {
+    return await claimSupabaseCheckout(id, fromStatuses, toStatus);
+  }
+  const db = getDb();
+  const idx = db.checkouts.findIndex(c => c.id === id);
+  if (idx === -1 || !fromStatuses.includes(db.checkouts[idx].status)) return null;
+  db.checkouts[idx] = { ...db.checkouts[idx], status: toStatus, updatedAt: new Date().toISOString() };
+  saveDb(db);
+  return db.checkouts[idx];
 }
 
 export async function dbUpdateCheckout(id, updates) {

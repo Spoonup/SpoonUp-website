@@ -56,8 +56,12 @@ CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY DEFAULT 1,
   event_name TEXT NOT NULL DEFAULT 'SpoonUp',
   currency_symbol TEXT NOT NULL DEFAULT '₹',
-  admin_pin TEXT NOT NULL DEFAULT 'CHANGE_ME',
+  admin_username TEXT NOT NULL DEFAULT 'admin',
+  -- NULL until the server bootstraps it from ADMIN_PASSWORD; never a default.
+  admin_password TEXT,
   counter_name TEXT NOT NULL DEFAULT 'Main Shop',
+  upi_id TEXT NOT NULL DEFAULT '',
+  upi_phone TEXT NOT NULL DEFAULT '',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT single_settings_row CHECK (id = 1)
 );
@@ -78,8 +82,8 @@ CREATE INDEX IF NOT EXISTS idx_products_created_at ON products (created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number_unique ON orders (order_number);
 
 -- 6. Initial Seed Settings
-INSERT INTO settings (id, event_name, currency_symbol, admin_pin, counter_name)
-VALUES (1, 'SpoonUp', '₹', 'CHANGE_ME', 'Main Shop')
+INSERT INTO settings (id, event_name, currency_symbol, admin_username, counter_name)
+VALUES (1, 'SpoonUp', '₹', 'admin', 'Main Shop')
 ON CONFLICT (id) DO NOTHING;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_access_token_unique ON orders(access_token);
@@ -133,19 +137,29 @@ CREATE TABLE IF NOT EXISTS checkouts (
   subtotal_amount NUMERIC NOT NULL DEFAULT 0 CHECK (subtotal_amount >= 0),
   tax_amount NUMERIC NOT NULL DEFAULT 0 CHECK (tax_amount >= 0),
   amount NUMERIC NOT NULL CHECK (amount >= 0),
-  status TEXT NOT NULL DEFAULT 'open',
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN (
+    'open', 'fulfilling', 'paid', 'completed', 'failed', 'cancelled'
+  )),
   razorpay_order_id TEXT,
   razorpay_payment_id TEXT,
   delivery_address JSONB,
+  -- References only ({id, fulfillmentType}); the orders table is the source of truth.
   created_orders JSONB DEFAULT '[]'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_username_lower ON users ((lower(username)));
-CREATE INDEX IF NOT EXISTS idx_users_email_lower ON users ((lower(email)));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower_unique ON users ((lower(username)));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower_unique ON users ((lower(email)));
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions (expires_at);
 CREATE INDEX IF NOT EXISTS idx_checkouts_razorpay_order_id ON checkouts(razorpay_order_id);
+CREATE INDEX IF NOT EXISTS idx_checkouts_status_created_at ON checkouts (status, created_at DESC);
+-- Exactly one order per (payment, fulfilment type): the database-level guard against
+-- the webhook and the client both fulfilling the same payment.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_payment_fulfillment_unique
+  ON orders (razorpay_payment_id, fulfillment_type)
+  WHERE razorpay_payment_id IS NOT NULL AND razorpay_payment_id <> '';
 
 -- 8. Row Level Security (RLS) Policies
 ALTER TABLE products ENABLE ROW LEVEL SECURITY;
@@ -173,13 +187,18 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS subtotal_amount NUMERIC NOT NULL DEF
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_amount NUMERIC NOT NULL DEFAULT 0;
 ALTER TABLE checkouts ADD COLUMN IF NOT EXISTS subtotal_amount NUMERIC NOT NULL DEFAULT 0;
 ALTER TABLE checkouts ADD COLUMN IF NOT EXISTS tax_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS upi_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS upi_phone TEXT NOT NULL DEFAULT '';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS admin_username TEXT NOT NULL DEFAULT 'admin';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS admin_password TEXT;
+ALTER TABLE settings DROP COLUMN IF EXISTS admin_pin;
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
 ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK (status IN (
   'pending', 'preparing', 'ready', 'completed', 'cancelled',
   'shipped', 'delivered', 'rejected', 'refunded'
 ));
 
--- Browser clients must not read settings (admin_pin) or orders directly.
+-- Browser clients must not read settings (admin credentials) or orders directly.
 -- The Node backend uses the service role key, which bypasses RLS.
 DROP POLICY IF EXISTS "Public can view products" ON products;
 DROP POLICY IF EXISTS "Public can view settings" ON settings;

@@ -2,10 +2,23 @@ import assert from 'assert';
 import crypto from 'crypto';
 
 const BASE_URL = `http://127.0.0.1:${process.env.PORT || 5001}`;
-const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'spoonadmin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'test-admin-password';
+
+async function adminLogin(password = ADMIN_PASSWORD, username = ADMIN_USERNAME) {
+  const res = await fetch(`${BASE_URL}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+  return res;
+}
 
 async function runSecurityTests() {
   console.log('🛡️  RUNNING RIGOROUS PRODUCTION SECURITY & ZERO-TRUST TESTS...\n');
+  const bootstrapLogin = await adminLogin();
+  assert.strictEqual(bootstrapLogin.status, 200);
+  const ADMIN_TOKEN = (await bootstrapLogin.json()).token;
 
   // 1. Get products for test orders
   const prodRes = await fetch(`${BASE_URL}/api/products`);
@@ -86,7 +99,7 @@ async function runSecurityTests() {
   // ------------------------------------------------------------------------
   // STATUS TAMPERING ATTACK TESTS
   // ------------------------------------------------------------------------
-  console.log('\n7. Tamper Test: Customer tries to mutate Order Status without Admin PIN...');
+  console.log('\n7. Tamper Test: Customer tries to mutate Order Status without admin auth...');
   const tamperStatusRes = await fetch(`${BASE_URL}/api/orders/${orderB.id}/status`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -96,8 +109,19 @@ async function runSecurityTests() {
   console.log('   🔒 BLOCKED (401 Unauthorized): Non-admin cannot alter order status!');
 
   console.log('\n8. Legitimate Admin: Admin views Order B and advances status...');
+  console.log('\n7b. Oracle Test: raw credentials must NOT be accepted on protected routes...');
+  const rawCredRes = await fetch(`${BASE_URL}/api/orders/${orderB.id}`, {
+    headers: { 'x-admin-token': ADMIN_PASSWORD }
+  });
+  assert.strictEqual(rawCredRes.status, 404, 'Raw password in a header must not grant admin access (would bypass the login rate limit)');
+  const rawCredList = await fetch(`${BASE_URL}/api/orders`, { headers: { 'x-admin-token': ADMIN_PASSWORD } });
+  assert.strictEqual(rawCredList.status, 401, 'Raw password must not authenticate admin list');
+  const legacyHeader = await fetch(`${BASE_URL}/api/orders`, { headers: { 'x-admin-pin': ADMIN_TOKEN } });
+  assert.strictEqual(legacyHeader.status, 200, 'Legacy x-admin-pin header must still carry a valid session token');
+  console.log('   🔒 Raw credentials rejected; only /api/admin/login accepts them (legacy header still carries tokens)');
+
   const adminGetRes = await fetch(`${BASE_URL}/api/orders/${orderB.id}`, {
-    headers: { 'x-admin-pin': ADMIN_PIN }
+    headers: { 'x-admin-token': ADMIN_TOKEN }
   });
   assert.strictEqual(adminGetRes.status, 200);
   const adminOrderB = await adminGetRes.json();
@@ -105,7 +129,7 @@ async function runSecurityTests() {
 
   const adminStatusRes = await fetch(`${BASE_URL}/api/orders/${orderB.id}/status`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
     body: JSON.stringify({ status: 'ready' })
   });
   assert.strictEqual(adminStatusRes.status, 200);
@@ -136,25 +160,33 @@ async function runSecurityTests() {
   const loginRes = await fetch(`${BASE_URL}/api/admin/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pin: ADMIN_PIN })
+    body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD })
   });
   assert.strictEqual(loginRes.status, 200);
   const loginData = await loginRes.json();
   assert.ok(loginData.token, 'Login must issue a session token');
-  assert.notStrictEqual(loginData.token, ADMIN_PIN, 'Session token must not be the raw PIN');
+  assert.notStrictEqual(loginData.token, ADMIN_PASSWORD, 'Session token must not be the raw password');
   assert.ok(loginData.token.startsWith('adm_'), 'Session token must be opaque');
-  console.log('   ✓ Admin login issues opaque session token (PIN not echoed)');
+  console.log('   ✓ Admin login issues opaque session token (password not echoed)');
 
   const session = loginData.token;
 
-  console.log('\n10. Leak Test: /api/settings must never return the stored PIN...');
-  for (const headers of [{}, { 'x-admin-pin': session }]) {
+  console.log('\n10. Leak Test: /api/settings must never return the stored admin password...');
+  for (const headers of [{}, { 'x-admin-token': session }]) {
     const res = await fetch(`${BASE_URL}/api/settings`, { headers });
     const body = await res.json();
-    assert.strictEqual(body.adminPin, undefined, 'Settings must not expose the admin PIN hash');
+    assert.strictEqual(body.adminPassword, undefined, 'Settings must not expose the admin password hash');
+    assert.strictEqual(body.adminPin, undefined, 'Settings must not expose any legacy PIN field');
     assert.strictEqual(body.razorpayKeySecret, undefined, 'Settings must not expose Razorpay secret');
   }
-  console.log('   ✓ PIN hash hidden from both public and admin settings responses');
+  // The username is half the credential: anonymous callers must not learn it.
+  const anonSettings = await (await fetch(`${BASE_URL}/api/settings`)).json();
+  assert.strictEqual(anonSettings.adminUsername, undefined, 'Public settings must not expose the admin username');
+  const adminSettings = await (await fetch(`${BASE_URL}/api/settings`, {
+    headers: { 'x-admin-token': session }
+  })).json();
+  assert.strictEqual(adminSettings.adminUsername, ADMIN_USERNAME, 'An authenticated admin may read the username');
+  console.log('   ✓ Password hash hidden everywhere; username only visible to an authenticated admin');
 
   console.log('\n11. Account isolation: User A must not read User B orders...');
   const suffix = Date.now();
@@ -246,7 +278,7 @@ async function runSecurityTests() {
 
   const kitchenShip = await fetch(`${BASE_URL}/api/orders/${orderB.id}/status`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': ADMIN_PIN },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
     body: JSON.stringify({ status: 'shipped' })
   });
   assert.strictEqual(kitchenShip.status, 400, 'Kitchen orders cannot use delivery statuses');
@@ -338,7 +370,7 @@ async function runSecurityTests() {
   });
   assert.strictEqual(refundRes.status, 200);
   const refundedOrders = await fetch(`${BASE_URL}/api/orders`, {
-    headers: { 'x-admin-pin': session }
+    headers: { 'x-admin-token': session }
   });
   const refundedList = await refundedOrders.json();
   const refunded = refundedList.find(o => o.razorpayPaymentId === payId);
@@ -387,34 +419,176 @@ async function runSecurityTests() {
   assert.strictEqual(completeFailed.status, 400);
   console.log('   🔒 Webhook HMAC required; captured/refund/failed edge cases handled');
 
-  console.log('\n13. Backdoor Test: the old PIN must stop working after a PIN change...');
-  const rotatedPin = 'rotated-pin-9182';
+  console.log('\n13. Backdoor Test: old credentials and old sessions must stop working after a change...');
+  const weakRotate = await fetch(`${BASE_URL}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': session },
+    body: JSON.stringify({ adminPassword: 'short1', currentPassword: ADMIN_PASSWORD })
+  });
+  assert.strictEqual(weakRotate.status, 400, 'Passwords shorter than 8 characters must be rejected');
+
+  const badUsername = await fetch(`${BASE_URL}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': session },
+    body: JSON.stringify({ adminUsername: 'a b!', currentPassword: ADMIN_PASSWORD })
+  });
+  assert.strictEqual(badUsername.status, 400, 'Malformed admin usernames must be rejected');
+
+  const noCurrentPassword = await fetch(`${BASE_URL}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': session },
+    body: JSON.stringify({ adminPassword: 'brand-new-password' })
+  });
+  assert.strictEqual(noCurrentPassword.status, 403, 'Changing the login without the current password must be refused');
+  const noCurrentBody = await noCurrentPassword.json();
+  assert.strictEqual(noCurrentBody.code, 'CURRENT_PASSWORD_REQUIRED');
+
+  const wrongCurrentPassword = await fetch(`${BASE_URL}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': session },
+    body: JSON.stringify({ adminPassword: 'brand-new-password', currentPassword: 'not-the-password' })
+  });
+  assert.strictEqual(wrongCurrentPassword.status, 403, 'A wrong current password must not allow a credential change');
+  console.log('   🔒 Weak password, bad username, and missing/wrong current password all refused');
+
+  const rotatedPassword = 'rotated-password-9182';
   const rotateRes = await fetch(`${BASE_URL}/api/settings`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': session },
-    body: JSON.stringify({ adminPin: rotatedPin })
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': session },
+    body: JSON.stringify({ adminPassword: rotatedPassword, currentPassword: ADMIN_PASSWORD })
   });
   assert.strictEqual(rotateRes.status, 200);
+  assert.strictEqual((await rotateRes.json()).credentialChanged, true);
 
-  const oldPinRes = await fetch(`${BASE_URL}/api/orders`, {
-    headers: { 'x-admin-pin': ADMIN_PIN }
+  const oldPasswordLogin = await adminLogin(ADMIN_PASSWORD);
+  assert.strictEqual(oldPasswordLogin.status, 401, 'Superseded password must not log in');
+
+  const oldSessionRes = await fetch(`${BASE_URL}/api/orders`, {
+    headers: { 'x-admin-token': session }
   });
-  assert.strictEqual(oldPinRes.status, 401, 'Superseded PIN must not remain valid');
+  assert.strictEqual(oldSessionRes.status, 401, 'Sessions issued under the old password must be revoked');
 
-  const newPinRes = await fetch(`${BASE_URL}/api/orders`, {
-    headers: { 'x-admin-pin': rotatedPin }
+  const newLogin = await adminLogin(rotatedPassword);
+  assert.strictEqual(newLogin.status, 200, 'Rotated password must log in');
+  const rotatedSession = (await newLogin.json()).token;
+  const newSessionRes = await fetch(`${BASE_URL}/api/orders`, {
+    headers: { 'x-admin-token': rotatedSession }
   });
-  assert.strictEqual(newPinRes.status, 200, 'Rotated PIN must work');
-  console.log('   🔒 Superseded PIN rejected (401); rotated PIN accepted (200)');
+  assert.strictEqual(newSessionRes.status, 200, 'Session from the rotated password must work');
+  console.log('   🔒 Old password and old sessions rejected (401); rotated password issues a working session');
 
-  // Restore the original PIN so repeat runs stay deterministic.
+  console.log('\n13b. Wrong username must not authenticate even with the right password...');
+  const wrongUser = await adminLogin(rotatedPassword, 'not-the-admin');
+  assert.strictEqual(wrongUser.status, 401, 'Correct password with the wrong username must be rejected');
+  const emptyUser = await adminLogin(rotatedPassword, '');
+  assert.strictEqual(emptyUser.status, 400, 'Empty username must be rejected');
+  console.log('   🔒 Username is actually checked, not decorative');
+
+  console.log('\n13c. Changing the username must also revoke sessions...');
+  const renameRes = await fetch(`${BASE_URL}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': rotatedSession },
+    body: JSON.stringify({ adminUsername: 'renamed_admin', currentPassword: rotatedPassword })
+  });
+  assert.strictEqual(renameRes.status, 200);
+  const afterRename = await fetch(`${BASE_URL}/api/orders`, { headers: { 'x-admin-token': rotatedSession } });
+  assert.strictEqual(afterRename.status, 401, 'Renaming the admin must revoke existing sessions');
+  const renamedLogin = await adminLogin(rotatedPassword, 'renamed_admin');
+  assert.strictEqual(renamedLogin.status, 200, 'New username must log in');
+  const renamedSession = (await renamedLogin.json()).token;
+  console.log('   🔒 Username change revokes sessions; new username logs in');
+
+  console.log('\n14. Logout must revoke the admin session...');
+  const logoutRes = await fetch(`${BASE_URL}/api/admin/logout`, {
+    method: 'POST',
+    headers: { 'x-admin-token': renamedSession }
+  });
+  assert.strictEqual(logoutRes.status, 200);
+  const afterLogout = await fetch(`${BASE_URL}/api/orders`, { headers: { 'x-admin-token': renamedSession } });
+  assert.strictEqual(afterLogout.status, 401, 'A logged-out session must be rejected');
+  console.log('   🔒 Logged-out session rejected');
+
+  // Restore the original credentials so repeat runs stay deterministic.
+  const restoreSession = (await (await adminLogin(rotatedPassword, 'renamed_admin')).json()).token;
   const restoreRes = await fetch(`${BASE_URL}/api/settings`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'x-admin-pin': rotatedPin },
-    body: JSON.stringify({ adminPin: ADMIN_PIN })
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': restoreSession },
+    body: JSON.stringify({
+      adminUsername: ADMIN_USERNAME,
+      adminPassword: ADMIN_PASSWORD,
+      currentPassword: rotatedPassword
+    })
   });
   assert.strictEqual(restoreRes.status, 200);
-  console.log('   ✓ Original PIN restored');
+  console.log('   ✓ Original admin credentials restored');
+
+  console.log('\n15. Wildcard login: LIKE metacharacters must never match another account...');
+  const wildcardLogin = await fetch(`${BASE_URL}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: '%', password: 'secretpass' })
+  });
+  assert.strictEqual(wildcardLogin.status, 401, 'Wildcard username must not authenticate');
+  const underscoreName = userB.user.username.replace(/[a-z]/, '_');
+  const underscoreLogin = await fetch(`${BASE_URL}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: underscoreName, password: 'secretpass' })
+  });
+  assert.strictEqual(underscoreLogin.status, 401, 'Underscore wildcard must not match a different username');
+  console.log('   🔒 Wildcard usernames rejected');
+
+  console.log('\n16. Race Test: concurrent webhook + client complete must create exactly one order set...');
+  const racePrepare = await fetch(`${BASE_URL}/api/checkout/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customerName: 'Race Guest',
+      customerPhone: '+919700044477',
+      items: [{ id: testProdId, quantity: 1 }],
+      paymentMethod: 'online'
+    })
+  });
+  assert.strictEqual(racePrepare.status, 200);
+  const raceCheckout = await racePrepare.json();
+  const racePayId = 'pay_webhook_race_1';
+  const racePayload = {
+    event: 'payment.captured',
+    payload: {
+      payment: {
+        entity: {
+          id: racePayId,
+          order_id: raceCheckout.razorpayOrderId,
+          amount: Math.round(Number(raceCheckout.amount) * 100),
+          status: 'captured',
+          captured: true,
+          notes: { checkoutId: raceCheckout.checkoutId }
+        }
+      }
+    }
+  };
+  const fire = () => fetch(`${BASE_URL}/api/webhooks/razorpay`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Razorpay-Signature': signWebhook(racePayload) },
+    body: JSON.stringify(racePayload)
+  });
+  const raceResults = await Promise.all([fire(), fire(), fire()]);
+  for (const r of raceResults) assert.ok([200, 503].includes(r.status), `Webhook race responses must be 200 or 503, got ${r.status}`);
+  const finalSession = (await (await adminLogin()).json()).token;
+  const allOrders = await (await fetch(`${BASE_URL}/api/orders?limit=1000`, { headers: { 'x-admin-token': finalSession } })).json();
+  const raceOrders = allOrders.filter(o => o.razorpayPaymentId === racePayId);
+  assert.strictEqual(raceOrders.length, 1, `Exactly one order must exist for the payment, found ${raceOrders.length}`);
+  console.log('   🔒 Concurrent fulfilment produced exactly one order');
+
+  console.log('\n17. Brute-force Test: repeated failed admin logins must be rate limited...');
+  let sawLimit = false;
+  for (let i = 0; i < 8; i++) {
+    const attempt = await adminLogin(`wrong-password-${i}`);
+    if (attempt.status === 429) { sawLimit = true; break; }
+    assert.strictEqual(attempt.status, 401);
+  }
+  assert.ok(sawLimit, 'Admin login must return 429 after repeated failures');
+  console.log('   🔒 Admin login rate limit engaged (429)');
 
   console.log('\n🎉 ALL PRODUCTION SECURITY & ZERO-TRUST TESTS PASSED SUCCESSFULLY! 🎉\n');
 }

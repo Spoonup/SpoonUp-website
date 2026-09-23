@@ -48,11 +48,21 @@ async function fulfillFromPayment(checkout, payment, sourceAmount) {
     return { ignored: true, reason: 'missing_payment_id' };
   }
 
-  const result = await fulfillPaidCheckout(checkout, {
-    paymentId,
-    deliveryAddress: checkout.deliveryAddress || null,
-    allowMissingDeliveryAddress: true
-  });
+  let result;
+  try {
+    result = await fulfillPaidCheckout(checkout, {
+      paymentId,
+      deliveryAddress: checkout.deliveryAddress || null,
+      allowMissingDeliveryAddress: true
+    });
+  } catch (err) {
+    // Another worker (usually the customer's browser) holds the fulfilment lock.
+    // Ask Razorpay to retry later so the webhook still acts as the safety net.
+    if (err.code === 'CHECKOUT_IN_PROGRESS') {
+      return { ignored: true, reason: 'in_progress', retry: true };
+    }
+    throw err;
+  }
   return {
     ignored: false,
     checkoutId: checkout.id,
@@ -73,11 +83,18 @@ async function markCheckoutFailed(checkout, paymentId) {
   return { ignored: false, checkoutId: checkout.id, status: 'failed' };
 }
 
-async function markOrdersRefunded(paymentId) {
+async function markOrdersRefunded(paymentId, refundPaise) {
   if (!paymentId) return { ignored: true, reason: 'missing_payment_id' };
   const orders = await dbGetOrdersByRazorpayPaymentId(paymentId);
   if (!orders.length) {
     return { ignored: true, reason: 'orders_not_found' };
+  }
+  // A partial refund must not flip the whole payment group to refunded; staff handle
+  // those manually from the dashboard.
+  const paidPaise = Math.round(orders.reduce((sum, o) => sum + Number(o.totalAmount || 0), 0) * 100);
+  if (refundPaise != null && Number.isFinite(Number(refundPaise)) && Number(refundPaise) < paidPaise) {
+    console.warn('[Razorpay Webhook] Partial refund received; orders left unchanged', paymentId, refundPaise, paidPaise);
+    return { ignored: true, reason: 'partial_refund' };
   }
   for (const order of orders) {
     if (order.paymentStatus === 'refunded' && order.status === 'refunded') continue;
@@ -116,7 +133,7 @@ export async function handleRazorpayWebhookEvent(event) {
 
   if (name === 'refund.created' || name === 'refund.processed' || name === 'refund.speed_changed') {
     const paymentId = refund?.payment_id || payment?.id || '';
-    return markOrdersRefunded(paymentId);
+    return markOrdersRefunded(paymentId, refund?.amount);
   }
 
   return { ignored: true, reason: 'unhandled_event' };

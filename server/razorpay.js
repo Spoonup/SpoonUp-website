@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 
+const RAZORPAY_TIMEOUT_MS = 8000;
+
 export function isRazorpayConfigured() {
   return Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
 }
@@ -18,20 +20,30 @@ export async function createRazorpayOrder({ amountPaise, receipt, notes }) {
   }
 
   const auth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-  const res = await fetch('https://api.razorpay.com/v1/orders', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${auth}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      amount: amountPaise,
-      currency: 'INR',
-      receipt: String(receipt).slice(0, 40),
-      notes: notes || {},
-      payment_capture: 1
-    })
-  });
+  let res;
+  try {
+    res = await fetch('https://api.razorpay.com/v1/orders', {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        amount: amountPaise,
+        currency: 'INR',
+        receipt: String(receipt).slice(0, 40),
+        notes: notes || {},
+        payment_capture: 1
+      }),
+      // Never let a slow payment provider hold a request open until the platform kills it.
+      signal: AbortSignal.timeout(RAZORPAY_TIMEOUT_MS)
+    });
+  } catch (cause) {
+    const err = new Error('Payment provider did not respond. Please try again.');
+    err.status = 503;
+    err.cause = cause;
+    throw err;
+  }
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {

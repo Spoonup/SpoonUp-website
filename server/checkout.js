@@ -5,9 +5,57 @@ import {
   generateOrderAccessToken,
   dbGetSettings,
   dbUpdateCheckout,
-  dbGetOrdersByRazorpayPaymentId
+  dbGetOrdersByRazorpayPaymentId,
+  dbGetOrdersByIds,
+  dbGetCheckoutById,
+  dbClaimCheckout
 } from './db.js';
 import { calculateLineTax, roundMoney } from './tax.js';
+
+// An unpaid checkout is only valid for this long; prices are snapshotted at prepare time.
+export const CHECKOUT_TTL_MS = 30 * 60 * 1000;
+
+export function isCheckoutExpired(checkout) {
+  if (!checkout || checkout.status !== 'open') return false;
+  const created = new Date(checkout.createdAt).getTime();
+  return Number.isFinite(created) && Date.now() - created > CHECKOUT_TTL_MS;
+}
+
+// Checkouts store only references to the orders they created; the orders table is the source of truth.
+export function orderRefs(orders) {
+  return (orders || []).map((o) => ({ id: o.id, fulfillmentType: o.fulfillmentType || 'immediate' }));
+}
+
+export async function loadCheckoutOrders(checkout) {
+  const refs = Array.isArray(checkout?.createdOrders) ? checkout.createdOrders : [];
+  const ids = refs.map((r) => r?.id).filter(Boolean);
+  return dbGetOrdersByIds(ids);
+}
+
+function domainError(message, status, code) {
+  const err = new Error(message);
+  err.status = status;
+  if (code) err.code = code;
+  return err;
+}
+
+/**
+ * Takes the fulfilment lock on a checkout. Exactly one caller wins; everyone else
+ * either gets the finished orders back (already completed) or a 409 to retry.
+ */
+export async function claimCheckoutForFulfillment(checkout, fromStatuses) {
+  const claimed = await dbClaimCheckout(checkout.id, fromStatuses, 'fulfilling');
+  if (claimed) return { claimed };
+
+  const latest = await dbGetCheckoutById(checkout.id);
+  if (latest?.status === 'completed') {
+    return { completed: latest, orders: await loadCheckoutOrders(latest) };
+  }
+  if (latest?.status === 'fulfilling') {
+    throw domainError('This order is already being processed. Please wait a moment and refresh.', 409, 'CHECKOUT_IN_PROGRESS');
+  }
+  throw domainError('Checkout session is no longer open.', 400, 'CHECKOUT_NOT_OPEN');
+}
 
 export function cleanPhoneNumber(raw) {
   const cleanPhone = String(raw || '').trim().replace(/[^\d+]/g, '');
@@ -194,77 +242,79 @@ export async function createSplitOrders({
 }
 
 export async function fulfillPaidCheckout(checkout, { paymentId, deliveryAddress, allowMissingDeliveryAddress = false }) {
-  const fromCheckout = Array.isArray(checkout.createdOrders) ? checkout.createdOrders : [];
-  const fromPayment = paymentId ? await dbGetOrdersByRazorpayPaymentId(paymentId) : [];
-  const merged = new Map();
-  for (const order of [...fromCheckout, ...fromPayment]) {
-    if (order?.id) merged.set(order.id, order);
-  }
-  let created = [...merged.values()];
-
-  if (checkout.status === 'completed' && created.length) {
-    return { checkout, orders: created, alreadyCompleted: true };
+  if (checkout.status === 'completed') {
+    const existing = await loadCheckoutOrders(checkout);
+    if (existing.length) return { checkout, orders: existing, alreadyCompleted: true };
   }
 
-  const address = deliveryAddress || checkout.deliveryAddress || null;
-  const hasImmediate = checkout.items.some((item) => !item.deliverLater);
-  const hasDelivery = checkout.items.some((item) => item.deliverLater);
-  const alreadyImmediate = created.some((o) => o.fulfillmentType === 'immediate');
-  const alreadyDelivery = created.some((o) => o.fulfillmentType === 'delivery');
-  const paymentGroupId = created.find((o) => o.paymentGroupId)?.paymentGroupId;
-
-  if (hasImmediate && !alreadyImmediate) {
-    created = created.concat(await createSplitOrders({
-      verifiedItems: checkout.items,
-      customerName: checkout.customerName,
-      customerPhone: checkout.customerPhone,
-      notes: checkout.notes,
-      userId: checkout.userId || null,
-      paymentMethod: checkout.paymentMethod,
-      paymentStatus: 'paid',
-      razorpayOrderId: checkout.razorpayOrderId || '',
-      razorpayPaymentId: paymentId,
-      deliveryAddress: address,
-      only: 'immediate',
-      paymentGroupId
-    }));
+  const claim = await claimCheckoutForFulfillment(checkout, ['open', 'paid']);
+  if (claim.completed) {
+    return { checkout: claim.completed, orders: claim.orders, alreadyCompleted: true };
   }
+  const active = claim.claimed;
+  const previousStatus = checkout.status;
 
-  if (hasDelivery && !alreadyDelivery) {
-    if (!address) {
-      if (!allowMissingDeliveryAddress) {
-        const err = new Error('Delivery address is required for deliver-later items.');
-        err.status = 400;
-        err.code = 'NEEDS_DELIVERY_ADDRESS';
-        throw err;
-      }
-    } else {
-      created = created.concat(await createSplitOrders({
-        verifiedItems: checkout.items,
-        customerName: checkout.customerName,
-        customerPhone: checkout.customerPhone,
-        notes: checkout.notes,
-        userId: checkout.userId || null,
-        paymentMethod: checkout.paymentMethod,
-        paymentStatus: 'paid',
-        razorpayOrderId: checkout.razorpayOrderId || '',
-        razorpayPaymentId: paymentId,
-        deliveryAddress: address,
-        only: 'delivery',
-        paymentGroupId: created.find((o) => o.paymentGroupId)?.paymentGroupId || paymentGroupId
-      }));
+  try {
+    const fromCheckout = await loadCheckoutOrders(active);
+    const fromPayment = paymentId ? await dbGetOrdersByRazorpayPaymentId(paymentId) : [];
+    const merged = new Map();
+    for (const order of [...fromCheckout, ...fromPayment]) {
+      if (order?.id) merged.set(order.id, order);
     }
+    let created = [...merged.values()];
+
+    const address = deliveryAddress || active.deliveryAddress || null;
+    const hasImmediate = active.items.some((item) => !item.deliverLater);
+    const hasDelivery = active.items.some((item) => item.deliverLater);
+    const alreadyImmediate = created.some((o) => o.fulfillmentType === 'immediate');
+    const alreadyDelivery = created.some((o) => o.fulfillmentType === 'delivery');
+    const paymentGroupId = created.find((o) => o.paymentGroupId)?.paymentGroupId;
+
+    const common = {
+      verifiedItems: active.items,
+      customerName: active.customerName,
+      customerPhone: active.customerPhone,
+      notes: active.notes,
+      userId: active.userId || null,
+      paymentMethod: active.paymentMethod,
+      paymentStatus: 'paid',
+      razorpayOrderId: active.razorpayOrderId || '',
+      razorpayPaymentId: paymentId,
+      deliveryAddress: address
+    };
+
+    if (hasImmediate && !alreadyImmediate) {
+      created = created.concat(await createSplitOrders({ ...common, only: 'immediate', paymentGroupId }));
+    }
+
+    if (hasDelivery && !alreadyDelivery) {
+      if (!address) {
+        if (!allowMissingDeliveryAddress) {
+          throw domainError('Delivery address is required for deliver-later items.', 400, 'NEEDS_DELIVERY_ADDRESS');
+        }
+      } else {
+        created = created.concat(await createSplitOrders({
+          ...common,
+          only: 'delivery',
+          paymentGroupId: created.find((o) => o.paymentGroupId)?.paymentGroupId || paymentGroupId
+        }));
+      }
+    }
+
+    const deliveryStillPending = hasDelivery && !created.some((o) => o.fulfillmentType === 'delivery');
+    const status = deliveryStillPending ? 'paid' : 'completed';
+
+    const updated = await dbUpdateCheckout(active.id, {
+      status,
+      razorpayPaymentId: paymentId || active.razorpayPaymentId || '',
+      deliveryAddress: address,
+      createdOrders: orderRefs(created)
+    });
+
+    return { checkout: updated, orders: created, alreadyCompleted: false };
+  } catch (err) {
+    // Release the lock so the webhook or a client retry can finish the job.
+    await dbUpdateCheckout(active.id, { status: previousStatus }).catch(() => {});
+    throw err;
   }
-
-  const deliveryStillPending = hasDelivery && !created.some((o) => o.fulfillmentType === 'delivery');
-  const status = deliveryStillPending ? 'paid' : 'completed';
-
-  const updated = await dbUpdateCheckout(checkout.id, {
-    status,
-    razorpayPaymentId: paymentId || checkout.razorpayPaymentId || '',
-    deliveryAddress: address,
-    createdOrders: created
-  });
-
-  return { checkout: updated, orders: created, alreadyCompleted: false };
 }

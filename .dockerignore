@@ -9,6 +9,7 @@ data
 !.env.example
 README.md
 test-*.js
+test
 run-all-tests.js
 .oxlintrc.json
 .cursor

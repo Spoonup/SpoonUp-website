@@ -4,6 +4,10 @@
 !.env.example
 
 # Local Database & Test Data
+# Contains the scrypt admin credential, user password hashes, live session
+# tokens, customer names/phone numbers and per-order access tokens. The app
+# recreates it from INITIAL_DATA (11 seed products) on first run, so no fixture
+# is needed for a fresh clone.
 data/db.json
 data/*.json
 
@@ -22,9 +26,15 @@ dist
 dist-ssr
 *.local
 
-# Editor directories and files
+# Generated / cache output (none committed; listed so they never are)
+coverage
+.vite
+*.tsbuildinfo
+
+# Editor & tool directories (local only)
 .vscode/*
 !.vscode/extensions.json
+.claude/
 .idea
 .DS_Store
 *.suo
@@ -32,3 +42,4 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+Thumbs.db

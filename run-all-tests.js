@@ -1,4 +1,10 @@
 import { spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function waitForServer(url, timeoutMs = 8000) {
   const start = Date.now();
@@ -27,6 +33,14 @@ function runScript(scriptPath, extraEnv = {}) {
 
 async function main() {
   console.log('🚀 Starting Event Order System server for automated test run...');
+
+  // The suite asserts against the bootstrap credentials, which only apply to a
+  // database with none stored yet. Use a throwaway file in the OS temp dir so the
+  // developer's own data/db.json (and its admin password) is never touched.
+  const testDbPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'spoonup-test-')),
+    'db.json'
+  );
   const port = process.env.TEST_PORT || '5002';
   const server = spawn('node', ['server/index.js'], {
     stdio: 'inherit',
@@ -34,9 +48,11 @@ async function main() {
       ...process.env,
       NODE_ENV: 'test',
       PORT: port,
+      LOCAL_DB_PATH: testDbPath,
       ADMIN_USERNAME: process.env.ADMIN_USERNAME || 'spoonadmin',
       ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'test-admin-password',
       ADMIN_SESSION_SECRET: process.env.ADMIN_SESSION_SECRET || 'test-admin-session-secret-at-least-32-chars',
+      SCHEDULER_SECRET: 'test-scheduler-secret',
       SUPABASE_URL: '',
       SUPABASE_SERVICE_ROLE_KEY: '',
       SUPABASE_ANON_KEY: '',
@@ -48,6 +64,7 @@ async function main() {
 
   const cleanup = () => {
     try { server.kill('SIGTERM'); } catch {}
+    try { fs.rmSync(path.dirname(testDbPath), { recursive: true, force: true }); } catch {}
   };
 
   process.on('SIGINT', cleanup);
@@ -62,6 +79,11 @@ async function main() {
     console.log('TEST SUITE 1: End-to-End Customer & Admin Workflow');
     console.log('====================================================');
     await runScript('test-e2e.js', { PORT: port });
+    await runScript('test-orders.js', { PORT: port });
+    await runScript('test-subscriptions.js', { PORT: port });
+    await runScript('test-payments.js', { PORT: port, RAZORPAY_WEBHOOK_SECRET: 'test-webhook-secret' });
+    await runScript('test-admin.js', { PORT: port });
+    await runScript('test-checkout-funding.js', { PORT: port, RAZORPAY_WEBHOOK_SECRET: 'test-webhook-secret', SCHEDULER_SECRET: 'test-scheduler-secret' });
 
     console.log('\n====================================================');
     console.log('TEST SUITE 2: Production Security & Zero-Trust IDOR');

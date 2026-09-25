@@ -7,6 +7,7 @@ import {
   AlertCircle,
   UploadCloud
 } from 'lucide-react';
+import { adminFetch } from '../lib/adminSession';
 
 const FALLBACK_IMAGE = 'https://storage.googleapis.com/spoonup-508319-product-images/products/catalog-prod-1.jpg';
 
@@ -28,10 +29,7 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
 
   const currency = settings?.currencySymbol || '₹';
 
-  const authHeaders = {
-    'Content-Type': 'application/json',
-    'x-admin-pin': adminPin
-  };
+  const jsonHeaders = { 'Content-Type': 'application/json' };
 
   const handleOpenAdd = () => {
     setEditingProduct(null);
@@ -84,12 +82,11 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
     try {
       let savedImageUrl = imageUrl;
       if (imageFile) {
-        const uploadRes = await fetch('/api/products/images', {
+        const uploadRes = await adminFetch('/api/products/images', adminPin, {
           method: 'POST',
           headers: {
             'Content-Type': imageFile.type,
-            'x-file-name': imageFile.name,
-            'x-admin-pin': adminPin
+            'x-file-name': imageFile.name
           },
           body: imageFile
         });
@@ -112,12 +109,9 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
       const url = editingProduct ? `/api/products/${editingProduct.id}` : '/api/products';
       const method = editingProduct ? 'PUT' : 'POST';
 
-      const res = await fetch(url, {
+      const res = await adminFetch(url, adminPin, {
         method,
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders
-        },
+        headers: jsonHeaders,
         body: JSON.stringify(payload)
       });
 
@@ -137,18 +131,15 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
 
   const handleToggleStock = async (product) => {
     try {
-      const res = await fetch(`/api/products/${product.id}`, {
+      const res = await adminFetch(`/api/products/${product.id}`, adminPin, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders
-        },
+        headers: jsonHeaders,
         body: JSON.stringify({ isAvailable: !product.isAvailable })
       });
       if (res.ok) {
         onRefreshProducts();
       }
-    } catch (err) {
+    } catch {
       alert('Error updating stock');
     }
   };
@@ -157,14 +148,11 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
     if (!window.confirm('Delete this product from menu?')) return;
 
     try {
-      const res = await fetch(`/api/products/${productId}`, {
-        method: 'DELETE',
-        headers: { 'x-admin-pin': adminPin }
-      });
+      const res = await adminFetch(`/api/products/${productId}`, adminPin, { method: 'DELETE' });
       if (res.ok) {
         onRefreshProducts();
       }
-    } catch (err) {
+    } catch {
       alert('Error deleting product');
     }
   };
@@ -172,17 +160,17 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
   return (
     <div className="space-y-5">
       {/* Header bar */}
-      <div className="bg-white p-4 sm:p-5 rounded-2xl border border-[#e8e5dc] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+      <div className="bg-white p-4 sm:p-5 rounded-2xl border border-[#E4E2D9] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-bold text-[#013e37]">Product Catalog & Menu</h2>
-          <p className="text-xs text-[#013e37]/70 mt-0.5">
+          <h2 className="text-lg font-bold text-[#1B2A18]">Product Catalog & Menu</h2>
+          <p className="text-xs text-[#1B2A18]/70 mt-0.5">
             Add items or toggle "Sold Out" instantly during the event.
           </p>
         </div>
 
         <button
           onClick={handleOpenAdd}
-          className="px-4 py-2 bg-[#013e37] hover:bg-[#06554c] text-[#ffefb3] font-semibold text-xs sm:text-sm rounded-full transition flex items-center gap-1.5 cursor-pointer"
+          className="px-4 py-2 bg-[#1B2A18] hover:bg-[#4A5D2E] text-[#FCFBF7] font-semibold text-xs sm:text-sm rounded-full transition flex items-center gap-1.5 cursor-pointer"
         >
           <Plus size={16} />
           <span>Add New Product</span>
@@ -198,11 +186,11 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
             <div
               key={product.id}
               className={`bg-white rounded-2xl border transition-all flex flex-col justify-between overflow-hidden ${
-                !isAvailable ? 'opacity-65 bg-[#faf9f5] border-[#e8e5dc]' : 'border-[#e8e5dc]'
+                !isAvailable ? 'opacity-65 bg-[#F4F1E7] border-[#E4E2D9]' : 'border-[#E4E2D9]'
               }`}
             >
               <div>
-                <div className="relative h-36 bg-[#faf9f5] overflow-hidden">
+                <div className="relative h-36 bg-[#F4F1E7] overflow-hidden">
                   <img
                     src={product.imageUrl}
                     alt={product.name}
@@ -216,7 +204,7 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                       onClick={() => handleToggleStock(product)}
                       className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold cursor-pointer transition border ${
                         isAvailable 
-                          ? 'bg-[#013e37] text-[#ffefb3] border-[#013e37]' 
+                          ? 'bg-[#1B2A18] text-[#FCFBF7] border-[#1B2A18]' 
                           : 'bg-white text-rose-700 border-rose-300'
                       }`}
                       title="Click to toggle stock"
@@ -225,11 +213,11 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                     </button>
                   </div>
                   <div className="absolute bottom-2.5 left-2.5">
-                    <span className="px-2 py-0.5 rounded-md bg-[#ffefb3] text-[#013e37] text-[10px] font-bold border border-[#f0de99]">
+                    <span className="px-2 py-0.5 rounded-md bg-[#D8E2C4] text-[#1B2A18] text-[10px] font-bold border border-[#f0de99]">
                       {product.category || 'General'}
                     </span>
                     {product.deliverLater && (
-                      <span className="ml-1 px-2 py-0.5 rounded-md bg-white text-[#013e37] text-[10px] font-bold border border-[#013e37]/20">
+                      <span className="ml-1 px-2 py-0.5 rounded-md bg-white text-[#1B2A18] text-[10px] font-bold border border-[#1B2A18]/20">
                         Later
                       </span>
                     )}
@@ -238,24 +226,24 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
 
                 <div className="p-3.5">
                   <div className="flex items-start justify-between gap-2">
-                    <h3 className="font-bold text-[#013e37] text-sm leading-snug">
+                    <h3 className="font-bold text-[#1B2A18] text-sm leading-snug">
                       {product.name}
                     </h3>
-                    <span className="font-black text-[#013e37] text-sm shrink-0">
+                    <span className="font-black text-[#1B2A18] text-sm shrink-0">
                       {currency}{product.price}
                     </span>
                   </div>
-                  <p className="text-xs text-[#013e37]/70 mt-1 line-clamp-2 leading-relaxed">
+                  <p className="text-xs text-[#1B2A18]/70 mt-1 line-clamp-2 leading-relaxed">
                     {product.description || 'No description.'}
                   </p>
                 </div>
               </div>
 
               {/* Bottom Card Actions */}
-              <div className="p-2.5 px-3.5 bg-[#faf9f5] border-t border-[#e8e5dc] flex items-center justify-between">
+              <div className="p-2.5 px-3.5 bg-[#F4F1E7] border-t border-[#E4E2D9] flex items-center justify-between">
                 <button
                   onClick={() => handleToggleStock(product)}
-                  className="text-xs font-semibold text-[#013e37]/80 hover:text-[#013e37] transition cursor-pointer"
+                  className="text-xs font-semibold text-[#1B2A18]/80 hover:text-[#1B2A18] transition cursor-pointer"
                 >
                   Set to {isAvailable ? 'Sold Out' : 'Available'}
                 </button>
@@ -263,14 +251,14 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => handleOpenEdit(product)}
-                    className="p-1 text-[#013e37]/60 hover:text-[#013e37] hover:bg-[#ffefb3]/60 rounded-lg transition cursor-pointer"
+                    className="p-1 text-[#1B2A18]/60 hover:text-[#1B2A18] hover:bg-[#D8E2C4]/60 rounded-lg transition cursor-pointer"
                     title="Edit Item"
                   >
                     <Edit3 size={14} />
                   </button>
                   <button
                     onClick={() => handleDelete(product.id)}
-                    className="p-1 text-[#013e37]/40 hover:text-rose-600 rounded-lg transition cursor-pointer"
+                    className="p-1 text-[#1B2A18]/40 hover:text-rose-600 rounded-lg transition cursor-pointer"
                     title="Delete Item"
                   >
                     <Trash2 size={14} />
@@ -285,14 +273,14 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
       {/* Add / Edit Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-2xs p-4">
-          <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border border-[#e8e5dc] overflow-hidden animate-in fade-in duration-150 max-h-[90vh] flex flex-col">
-            <div className="p-4 bg-[#013e37] text-[#ffefb3] flex items-center justify-between">
+          <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border border-[#E4E2D9] overflow-hidden animate-in fade-in duration-150 max-h-[90vh] flex flex-col">
+            <div className="p-4 bg-[#1B2A18] text-[#FCFBF7] flex items-center justify-between">
               <h3 className="font-bold text-base">
                 {editingProduct ? 'Edit Product' : 'Add New Menu Item'}
               </h3>
               <button 
                 onClick={() => setIsModalOpen(false)}
-                className="text-[#ffefb3]/80 hover:text-[#ffefb3] p-1 rounded-lg cursor-pointer"
+                className="text-[#FCFBF7]/80 hover:text-[#FCFBF7] p-1 rounded-lg cursor-pointer"
               >
                 <X size={18} />
               </button>
@@ -307,7 +295,7 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
               )}
 
               <div>
-                <label className="block font-bold text-[#013e37] mb-1">
+                <label className="block font-bold text-[#1B2A18] mb-1">
                   Product Title *
                 </label>
                 <input
@@ -316,13 +304,13 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                   placeholder="e.g. Masala Chai, Cold Brew"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  className="w-full px-3 py-2 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-xs text-[#013e37] focus:border-[#013e37] focus:outline-hidden"
+                  className="w-full px-3 py-2 bg-[#F4F1E7] border border-[#E4E2D9] rounded-xl text-xs text-[#1B2A18] focus:border-[#1B2A18] focus:outline-hidden"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-[#013e37] mb-1">
+                  <label className="block font-bold text-[#1B2A18] mb-1">
                     Category
                   </label>
                   <input
@@ -330,12 +318,12 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                     placeholder="Beverages, Food..."
                     value={category}
                     onChange={(e) => setCategory(e.target.value)}
-                    className="w-full px-3 py-2 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-xs text-[#013e37] focus:border-[#013e37] focus:outline-hidden"
+                    className="w-full px-3 py-2 bg-[#F4F1E7] border border-[#E4E2D9] rounded-xl text-xs text-[#1B2A18] focus:border-[#1B2A18] focus:outline-hidden"
                   />
                 </div>
 
                 <div>
-                  <label className="block font-bold text-[#013e37] mb-1">
+                  <label className="block font-bold text-[#1B2A18] mb-1">
                     Price ({currency}) *
                   </label>
                   <input
@@ -345,13 +333,13 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                     placeholder="e.g. 120"
                     value={price}
                     onChange={(e) => setPrice(e.target.value)}
-                    className="w-full px-3 py-2 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-xs font-mono font-bold text-[#013e37] focus:border-[#013e37] focus:outline-hidden"
+                    className="w-full px-3 py-2 bg-[#F4F1E7] border border-[#E4E2D9] rounded-xl text-xs font-mono font-bold text-[#1B2A18] focus:border-[#1B2A18] focus:outline-hidden"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block font-bold text-[#013e37] mb-1">
+                <label className="block font-bold text-[#1B2A18] mb-1">
                   Description
                 </label>
                 <textarea
@@ -359,15 +347,15 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                   placeholder="Ingredients or description..."
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  className="w-full px-3 py-2 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-xs text-[#013e37] focus:border-[#013e37] focus:outline-hidden"
+                  className="w-full px-3 py-2 bg-[#F4F1E7] border border-[#E4E2D9] rounded-xl text-xs text-[#1B2A18] focus:border-[#1B2A18] focus:outline-hidden"
                 />
               </div>
 
               <div>
-                <label className="block font-bold text-[#013e37] mb-1">
+                <label className="block font-bold text-[#1B2A18] mb-1">
                   Product Image *
                 </label>
-                <label className="flex items-center justify-center gap-2 w-full px-3 py-3 bg-[#faf9f5] border border-dashed border-[#013e37]/30 rounded-xl cursor-pointer hover:bg-[#ffefb3]/30">
+                <label className="flex items-center justify-center gap-2 w-full px-3 py-3 bg-[#F4F1E7] border border-dashed border-[#1B2A18]/30 rounded-xl cursor-pointer hover:bg-[#D8E2C4]/30">
                   <UploadCloud size={16} />
                   <span>{imageFile ? imageFile.name : 'Choose image (JPG, PNG, WebP or GIF)'}</span>
                   <input
@@ -378,25 +366,25 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                   />
                 </label>
                 {imageUrl && !imageFile && (
-                  <p className="text-[10px] text-[#013e37]/60 mt-1">Current image will be kept unless you choose a new file.</p>
+                  <p className="text-[10px] text-[#1B2A18]/60 mt-1">Current image will be kept unless you choose a new file.</p>
                 )}
-                <p className="text-[10px] text-[#013e37]/60 mt-1">Images are stored and served from Google Cloud Storage.</p>
+                <p className="text-[10px] text-[#1B2A18]/60 mt-1">Images are stored and served from Google Cloud Storage.</p>
               </div>
 
               <div>
-                <label className="block font-bold text-[#013e37] mb-1">
+                <label className="block font-bold text-[#1B2A18] mb-1">
                   GST Rate (%)
                 </label>
                 <select
                   value={gstRate}
                   onChange={(e) => setGstRate(e.target.value)}
-                  className="w-full px-3 py-2 bg-[#faf9f5] border border-[#e8e5dc] rounded-xl text-xs text-[#013e37]"
+                  className="w-full px-3 py-2 bg-[#F4F1E7] border border-[#E4E2D9] rounded-xl text-xs text-[#1B2A18]"
                 >
                   {[0, 5, 12, 18, 28, 40].map((rate) => (
                     <option key={rate} value={rate}>{rate}%</option>
                   ))}
                 </select>
-                <p className="text-[10px] text-[#013e37]/60 mt-1">Default restaurant/takeaway rate is 5%. Confirm packaged-goods classification with your GST advisor.</p>
+                <p className="text-[10px] text-[#1B2A18]/60 mt-1">Default restaurant/takeaway rate is 5%. Confirm packaged-goods classification with your GST advisor.</p>
               </div>
 
               <div className="pt-1 flex items-center gap-2">
@@ -405,9 +393,9 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                   id="modalIsAvailable"
                   checked={isAvailable}
                   onChange={(e) => setIsAvailable(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-[#013e37]"
+                  className="w-3.5 h-3.5 accent-[#1B2A18]"
                 />
-                <label htmlFor="modalIsAvailable" className="font-bold text-[#013e37] cursor-pointer">
+                <label htmlFor="modalIsAvailable" className="font-bold text-[#1B2A18] cursor-pointer">
                   In stock & available to order
                 </label>
               </div>
@@ -418,25 +406,25 @@ export default function AdminProducts({ products, onRefreshProducts, adminPin, s
                   id="modalDeliverLater"
                   checked={deliverLater}
                   onChange={(e) => setDeliverLater(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-[#013e37]"
+                  className="w-3.5 h-3.5 accent-[#1B2A18]"
                 />
-                <label htmlFor="modalDeliverLater" className="font-bold text-[#013e37] cursor-pointer">
+                <label htmlFor="modalDeliverLater" className="font-bold text-[#1B2A18] cursor-pointer">
                   Deliver later (ships after the event)
                 </label>
               </div>
 
-              <div className="pt-3 border-t border-[#e8e5dc] flex justify-end gap-2">
+              <div className="pt-3 border-t border-[#E4E2D9] flex justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-3.5 py-2 text-xs font-semibold text-[#013e37]/70 hover:bg-[#faf9f5] rounded-xl transition cursor-pointer"
+                  className="px-3.5 py-2 text-xs font-semibold text-[#1B2A18]/70 hover:bg-[#F4F1E7] rounded-xl transition cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={isSaving}
-                  className="px-4 py-2 bg-[#013e37] hover:bg-[#06554c] disabled:opacity-50 text-[#ffefb3] text-xs font-bold rounded-xl transition cursor-pointer"
+                  className="px-4 py-2 bg-[#1B2A18] hover:bg-[#4A5D2E] disabled:opacity-50 text-[#FCFBF7] text-xs font-bold rounded-xl transition cursor-pointer"
                 >
                   {isSaving ? 'Saving...' : editingProduct ? 'Update Product' : 'Add Product'}
                 </button>

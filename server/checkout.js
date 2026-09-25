@@ -11,6 +11,7 @@ import {
   dbClaimCheckout
 } from './db.js';
 import { calculateLineTax, roundMoney } from './tax.js';
+import { createParentOrderWithSubOrders } from './parentOrders.js';
 
 // An unpaid checkout is only valid for this long; prices are snapshotted at prepare time.
 export const CHECKOUT_TTL_MS = 30 * 60 * 1000;
@@ -264,6 +265,49 @@ export async function fulfillPaidCheckout(checkout, { paymentId, deliveryAddress
     let created = [...merged.values()];
 
     const address = deliveryAddress || active.deliveryAddress || null;
+
+    // Checkouts created from this build carry the full cart (parts, schedules
+    // and subscription intents) priced at prepare time. Those fulfil through the
+    // parent-order path, which is the only one that creates subscriptions and
+    // funds their wallets. Checkouts created before this deploy have no snapshot
+    // and keep the legacy split, so nothing in flight breaks.
+    if (active.cartSnapshot && created.length === 0) {
+      const built = await createParentOrderWithSubOrders({
+        cart: active.cartSnapshot,
+        customerName: active.customerName,
+        customerPhone: active.customerPhone,
+        notes: active.notes,
+        userId: active.userId || null,
+        platform: active.platform || 'WEB',
+        source: 'CUSTOMER',
+        paymentMethod: active.paymentMethod,
+        // Only reached once payment is verified, so the plan is funded here.
+        paymentStatus: 'paid',
+        razorpayOrderId: active.razorpayOrderId || '',
+        razorpayPaymentId: paymentId || '',
+        deliveryAddress: address,
+        coupon: active.cartSnapshot.coupon || null,
+        // Derived from the checkout: a second fulfilment would collide on the
+        // primary key instead of creating a duplicate parent, subscription or topup.
+        parentOrderId: `par-${active.id.replace(/^chk-/, '')}`
+      });
+
+      const updatedCheckout = await dbUpdateCheckout(active.id, {
+        status: 'completed',
+        razorpayPaymentId: paymentId || active.razorpayPaymentId || '',
+        deliveryAddress: address,
+        parentOrderId: built.parent.id,
+        createdOrders: orderRefs(built.subOrders)
+      });
+      return {
+        checkout: updatedCheckout,
+        orders: built.subOrders,
+        parentOrder: built.parent,
+        subscriptions: built.subscriptions,
+        alreadyCompleted: false
+      };
+    }
+
     const hasImmediate = active.items.some((item) => !item.deliverLater);
     const hasDelivery = active.items.some((item) => item.deliverLater);
     const alreadyImmediate = created.some((o) => o.fulfillmentType === 'immediate');

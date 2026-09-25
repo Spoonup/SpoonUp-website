@@ -1,419 +1,86 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  ClipboardList, 
-  Package, 
-  Settings as SettingsIcon, 
-  LogOut, 
-  ShoppingBag,
-  Clock,
-  Truck,
-  User
-} from 'lucide-react';
-import CustomerMenu from './components/CustomerMenu';
-import OrderStatus from './components/OrderStatus';
-import AdminOrders from './components/AdminOrders';
-import AdminProducts from './components/AdminProducts';
-import AdminSettings from './components/AdminSettings';
-import AdminLoginModal from './components/AdminLoginModal';
-import UserAuthModal from './components/UserAuthModal';
-import AdminDeliveries from './components/AdminDeliveries';
+import React from 'react';
+import { Routes, Route, Navigate } from 'react-router-dom';
+import SiteLayout from './components/layout/SiteLayout';
+import ScrollToTop from './components/ScrollToTop';
+import CartToast from './components/ui/CartToast';
+import { CartProvider } from './lib/CartContext';
+import { CatalogueProvider } from './lib/CatalogueContext';
+import { UserProvider } from './lib/UserContext';
+import { AccountProvider } from './lib/AccountContext';
+import { ServiceAreaProvider } from './lib/ServiceAreaContext';
+import PincodePicker from './components/ui/PincodePicker';
 
-// Helper to determine view based on browser URL pathname
-const parseRoute = (pathname, loggedIn) => {
-  const clean = (pathname || '').toLowerCase().replace(/\/+$/, '') || '/';
-  if (clean === '/admin' || clean === '/admin/orders') {
-    return { view: 'admin_orders', needsAuth: !loggedIn, path: '/admin/orders' };
-  }
-  if (clean === '/admin/products') {
-    return { view: 'admin_products', needsAuth: !loggedIn, path: '/admin/products' };
-  }
-  if (clean === '/admin/settings') {
-    return { view: 'admin_settings', needsAuth: !loggedIn, path: '/admin/settings' };
-  }
-  if (clean === '/admin/deliveries') {
-    return { view: 'admin_deliveries', needsAuth: !loggedIn, path: '/admin/deliveries' };
-  }
-  if (clean === '/status') {
-    return { view: 'status', needsAuth: false, path: '/status' };
-  }
-  return { view: 'menu', needsAuth: false, path: '/' };
+import Home from './pages/Home';
+import Shop from './pages/Shop';
+import Subscribe from './pages/Subscribe';
+import Cart from './pages/Cart';
+import OurStory from './pages/OurStory';
+import Checkout from './pages/Checkout';
+import OrderConfirmed from './pages/OrderConfirmed';
+import Account from './pages/Account';
+import SignIn from './pages/SignIn';
+import CheckoutLayout from './components/layout/CheckoutLayout';
+import NotFound from './pages/NotFound';
+import Placeholder from './pages/Placeholder';
+import AdminApp from './admin/AdminApp';
+
+const LEGAL = {
+  terms: 'Terms & conditions',
+  privacy: 'Privacy policy',
+  returns: 'Returns & refunds',
+  shipping: 'Shipping policy',
+  wallet: 'Wallet & subscription terms'
 };
 
 export default function App() {
-  const [view, setView] = useState('menu'); // 'menu' | 'status' | 'admin_orders' | 'admin_products' | 'admin_settings'
-  const [products, setProducts] = useState([]);
-  const [settings, setSettings] = useState({
-    eventName: 'SpoonUp',
-    currencySymbol: '₹',
-    counterName: 'Main Shop'
-  });
-  const [cart, setCart] = useState([]);
-  const [currentOrder, setCurrentOrder] = useState(null);
-  const [currentUser, setCurrentUser] = useState(null);
-  const [userToken, setUserToken] = useState('');
-  const [isUserAuthOpen, setIsUserAuthOpen] = useState(false);
-  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
-  const [adminPin, setAdminPin] = useState('');
-  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-
-  // Load initial settings and products
-  const loadData = async () => {
-    try {
-      setIsLoading(true);
-      const [settingsRes, productsRes] = await Promise.all([
-        fetch('/api/settings'),
-        fetch('/api/products')
-      ]);
-
-      if (settingsRes.ok) {
-        const s = await settingsRes.json();
-        setSettings(s);
-      }
-      if (productsRes.ok) {
-        const p = await productsRes.json();
-        setProducts(p);
-      }
-    } catch (err) {
-      console.error('Failed to load initial app data:', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Navigate and update browser URL
-  const navigateTo = (newView, customPath) => {
-    setView(newView);
-    let path = customPath;
-    if (!path) {
-      if (newView === 'menu') path = '/';
-      else if (newView === 'status') path = '/status';
-      else if (newView === 'admin_orders') path = '/admin/orders';
-      else if (newView === 'admin_products') path = '/admin/products';
-      else if (newView === 'admin_settings') path = '/admin/settings';
-      else if (newView === 'admin_deliveries') path = '/admin/deliveries';
-    }
-    if (path && window.location.pathname !== path) {
-      window.history.pushState(null, '', path);
-    }
-  };
-
-  useEffect(() => {
-    loadData();
-
-    // Older builds stored the raw staff PIN; drop it and require a fresh login.
-    localStorage.removeItem('admin_pin');
-
-    const savedSession = localStorage.getItem('admin_session');
-    const loggedIn = Boolean(savedSession);
-    if (savedSession) {
-      setAdminPin(savedSession);
-      setIsAdminLoggedIn(true);
-    }
-
-    const myOrders = JSON.parse(localStorage.getItem('my_orders') || '[]');
-    if (myOrders.length > 0) {
-      setCurrentOrder(myOrders[0]);
-    }
-
-    const savedUserToken = localStorage.getItem('user_session');
-    if (savedUserToken) {
-      setUserToken(savedUserToken);
-      fetch('/api/auth/me', { headers: { 'x-user-token': savedUserToken } })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          if (data?.user) setCurrentUser(data.user);
-          else localStorage.removeItem('user_session');
-        })
-        .catch(() => {});
-    }
-
-    // Handle initial URL route (e.g. user typed /wp-admin or /admin in address bar)
-    const initialRoute = parseRoute(window.location.pathname, loggedIn);
-    if (initialRoute.needsAuth) {
-      setView('menu');
-      setIsLoginModalOpen(true);
-    } else {
-      setView(initialRoute.view);
-    }
-
-    // Handle browser Back / Forward buttons
-    const handlePopState = () => {
-      const isAuth = Boolean(localStorage.getItem('admin_session'));
-      const route = parseRoute(window.location.pathname, isAuth);
-      if (route.needsAuth) {
-        setView('menu');
-        setIsLoginModalOpen(true);
-      } else {
-        setView(route.view);
-      }
-    };
-
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
-
-  const handleLoginSuccess = (pin, newSettings) => {
-    setAdminPin(pin);
-    setIsAdminLoggedIn(true);
-    setIsLoginModalOpen(false);
-    if (newSettings) setSettings(newSettings);
-    navigateTo('admin_orders', '/admin/orders');
-  };
-
-  const handleLoginModalClose = () => {
-    setIsLoginModalOpen(false);
-    // If user cancelled login modal without logging in, return URL to '/'
-    const savedPin = localStorage.getItem('admin_session');
-    if (!savedPin && !isAdminLoggedIn) {
-      const clean = window.location.pathname.toLowerCase();
-      if (clean.includes('admin') || clean.includes('dashboard')) {
-        window.history.pushState(null, '', '/');
-        setView('menu');
-      }
-    }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('admin_session');
-    localStorage.removeItem('admin_pin');
-    setAdminPin('');
-    setIsAdminLoggedIn(false);
-    navigateTo('menu', '/');
-  };
-
-  const handleOrderPlaced = (newOrder) => {
-    const first = Array.isArray(newOrder) ? newOrder[0] : newOrder;
-    setCurrentOrder(first);
-    navigateTo('status', '/status');
-  };
-
-  const handleUserAuthSuccess = (token, user) => {
-    setUserToken(token);
-    setCurrentUser(user);
-    setIsUserAuthOpen(false);
-  };
-
-  const handleUserLogout = async () => {
-    try {
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: { 'x-user-token': userToken }
-      });
-    } catch {}
-    localStorage.removeItem('user_session');
-    setUserToken('');
-    setCurrentUser(null);
-  };
-
-  const isAdminView = view.startsWith('admin_');
-
   return (
-    <div className="min-h-screen bg-[#faf9f5] text-[#013e37] flex flex-col font-sans selection:bg-[#ffefb3] selection:text-[#013e37]">
-      {/* Top Minimal Navigation Bar */}
-      <header className="sticky top-0 z-30 bg-[#faf9f5]/90 backdrop-blur-md border-b border-[#e8e5dc]">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
-          {/* Brand Logo & Name */}
-          <div 
-            onClick={() => navigateTo('menu', '/')}
-            className="flex items-center gap-2.5 cursor-pointer group"
-          >
-            <img
-              src="/SpoonUp_Official_Logo_Transparent.png"
-              alt="SpoonUp"
-              className="h-10 w-auto object-contain transition-transform group-hover:scale-105"
+    <UserProvider>
+    <AccountProvider>
+    <ServiceAreaProvider>
+    <CatalogueProvider>
+    <CartProvider>
+      <ScrollToTop />
+      <Routes>
+        {/* Customer-facing site */}
+        <Route element={<SiteLayout />}>
+          <Route index element={<Home />} />
+          <Route path="shop" element={<Shop />} />
+          <Route path="subscribe" element={<Subscribe />} />
+          <Route path="cart" element={<Cart />} />
+          <Route path="our-story" element={<OurStory />} />
+
+          <Route path="account/*" element={<Account />} />
+          <Route path="signin" element={<SignIn />} />
+
+          {Object.entries(LEGAL).map(([slug, title]) => (
+            <Route
+              key={slug}
+              path={`legal/${slug}`}
+              element={<Placeholder title={title} blurb="Final policy copy is pending from the product owner." batch="content sign-off" />}
             />
-            <div className="hidden sm:block">
-              <span className="text-[11px] font-semibold text-[#013e37]/60 uppercase tracking-widest block leading-tight">
-                {isAdminView ? 'Staff Dashboard' : 'Small Indulgences. Big Impact.'}
-              </span>
-            </div>
-          </div>
+          ))}
 
-          {/* Right Navigation Actions */}
-          <div className="flex items-center gap-2">
-            {!isAdminView ? (
-              <>
-                {currentUser ? (
-                  <button
-                    onClick={handleUserLogout}
-                    className="px-3 py-1.5 rounded-full text-xs font-semibold bg-white hover:bg-[#ffefb3]/60 text-[#013e37] border border-[#e8e5dc] cursor-pointer flex items-center gap-1.5"
-                  >
-                    <User size={13} />
-                    <span>{currentUser.username}</span>
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setIsUserAuthOpen(true)}
-                    className="px-3 py-1.5 rounded-full text-xs font-semibold bg-white hover:bg-[#ffefb3]/60 text-[#013e37] border border-[#e8e5dc] cursor-pointer flex items-center gap-1.5"
-                  >
-                    <User size={13} />
-                    <span>Login / Sign up</span>
-                  </button>
-                )}
-                {(currentOrder || currentUser) && (
-                  <button
-                    onClick={() => navigateTo('status', '/status')}
-                    className={`px-3 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer border ${
-                      view === 'status' 
-                        ? 'bg-[#ffefb3] text-[#013e37] border-[#013e37]/20 font-bold' 
-                        : 'bg-white hover:bg-[#ffefb3]/60 text-[#013e37] border-[#e8e5dc]'
-                    }`}
-                  >
-                    <Clock size={13} className="text-[#013e37]" />
-                    <span>{currentUser ? 'My orders' : `Order #${currentOrder.orderNumber}`}</span>
-                  </button>
-                )}
-                {/* Notice: Admin button is completely hidden from customer view */}
-              </>
-            ) : (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => navigateTo('menu', '/')}
-                  className="px-3 py-1.5 rounded-full text-xs font-semibold bg-[#ffefb3] hover:bg-[#ffefb3]/80 text-[#013e37] transition flex items-center gap-1.5 cursor-pointer border border-[#013e37]/20"
-                >
-                  <ShoppingBag size={13} />
-                  <span>Customer Menu</span>
-                </button>
+          <Route path="*" element={<NotFound />} />
+        </Route>
 
-                <button
-                  onClick={handleLogout}
-                  className="p-1.5 text-[#013e37]/60 hover:text-[#013e37] hover:bg-[#ffefb3]/50 rounded-full transition cursor-pointer"
-                  title="Logout"
-                >
-                  <LogOut size={16} />
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
+        {/* Checkout flow uses minimal chrome (no nav, no full footer) */}
+        <Route element={<CheckoutLayout />}>
+          <Route path="/checkout" element={<Checkout />} />
+          <Route path="/order-confirmed" element={<OrderConfirmed />} />
+        </Route>
 
-        {/* Minimal Sub-nav for Admin Portal */}
-        {isAdminView && (
-          <div className="border-t border-[#e8e5dc] bg-[#f5f3eb] px-4 sm:px-6">
-            <div className="max-w-5xl mx-auto flex items-center gap-2 overflow-x-auto py-2 no-scrollbar">
-              <button
-                onClick={() => navigateTo('admin_orders', '/admin/orders')}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
-                  view === 'admin_orders'
-                    ? 'bg-[#013e37] text-[#ffefb3]'
-                    : 'bg-white hover:bg-[#ffefb3]/50 text-[#013e37] border border-[#e8e5dc]'
-                }`}
-              >
-                <ClipboardList size={14} />
-                <span>Live Orders</span>
-              </button>
+        {/* Existing staff dashboard — unchanged, still on the previous design.
+            The handoff's admin screens (1d/1e/1f) are a later phase. */}
+        <Route path="/admin/*" element={<AdminApp />} />
+        <Route path="/status" element={<Navigate to="/account" replace />} />
+      </Routes>
 
-              <button
-                onClick={() => navigateTo('admin_products', '/admin/products')}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
-                  view === 'admin_products'
-                    ? 'bg-[#013e37] text-[#ffefb3]'
-                    : 'bg-white hover:bg-[#ffefb3]/50 text-[#013e37] border border-[#e8e5dc]'
-                }`}
-              >
-                <Package size={14} />
-                <span>Menu & Stock</span>
-              </button>
-
-              <button
-                onClick={() => navigateTo('admin_deliveries', '/admin/deliveries')}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
-                  view === 'admin_deliveries'
-                    ? 'bg-[#013e37] text-[#ffefb3]'
-                    : 'bg-white hover:bg-[#ffefb3]/50 text-[#013e37] border border-[#e8e5dc]'
-                }`}
-              >
-                <Truck size={14} />
-                <span>Deliveries</span>
-              </button>
-
-              <button
-                onClick={() => navigateTo('admin_settings', '/admin/settings')}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
-                  view === 'admin_settings'
-                    ? 'bg-[#013e37] text-[#ffefb3]'
-                    : 'bg-white hover:bg-[#ffefb3]/50 text-[#013e37] border border-[#e8e5dc]'
-                }`}
-              >
-                <SettingsIcon size={14} />
-                <span>Settings & Standee</span>
-              </button>
-            </div>
-          </div>
-        )}
-      </header>
-
-      {/* Main Minimal Viewport */}
-      <main className="flex-1 max-w-5xl w-full mx-auto p-4 sm:p-6">
-        {view === 'menu' && (
-          <CustomerMenu
-            products={products}
-            settings={settings}
-            cart={cart}
-            setCart={setCart}
-            onOrderPlaced={handleOrderPlaced}
-            onOpenMyOrders={() => navigateTo('status', '/status')}
-            currentUser={currentUser}
-            userToken={userToken}
-            onRequestAuth={() => setIsUserAuthOpen(true)}
-          />
-        )}
-
-        {view === 'status' && (
-          <OrderStatus
-            orderId={currentOrder?.id}
-            initialOrder={currentOrder}
-            onBackToMenu={() => navigateTo('menu', '/')}
-            currencySymbol={settings.currencySymbol}
-            userToken={userToken}
-            currentUser={currentUser}
-          />
-        )}
-
-        {view === 'admin_orders' && (
-          <AdminOrders
-            adminPin={adminPin}
-            settings={settings}
-          />
-        )}
-
-        {view === 'admin_products' && (
-          <AdminProducts
-            products={products}
-            onRefreshProducts={loadData}
-            adminPin={adminPin}
-            settings={settings}
-          />
-        )}
-
-        {view === 'admin_deliveries' && (
-          <AdminDeliveries
-            adminPin={adminPin}
-            settings={settings}
-          />
-        )}
-
-        {view === 'admin_settings' && (
-          <AdminSettings
-            adminPin={adminPin}
-            settings={settings}
-            onRefreshSettings={loadData}
-          />
-        )}
-      </main>
-
-      {/* Admin Login Modal */}
-      <AdminLoginModal
-        isOpen={isLoginModalOpen}
-        onClose={handleLoginModalClose}
-        onLoginSuccess={handleLoginSuccess}
-      />
-      <UserAuthModal
-        isOpen={isUserAuthOpen}
-        onClose={() => setIsUserAuthOpen(false)}
-        onAuthSuccess={handleUserAuthSuccess}
-      />
-    </div>
+      <CartToast />
+      <PincodePicker />
+    </CartProvider>
+    </CatalogueProvider>
+    </ServiceAreaProvider>
+    </AccountProvider>
+    </UserProvider>
   );
 }

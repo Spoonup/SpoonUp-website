@@ -31,12 +31,45 @@ import {
   fetchSupabaseOrdersByRazorpayPaymentId,
   fetchSupabaseOrdersByIds,
   deleteExpiredSupabaseUserSessions,
-  claimSupabaseCheckout
+  claimSupabaseCheckout,
+  claimSupabaseSubscriptionDelivery,
+  updateSupabaseSubscriptionDelivery,
+  fetchSupabaseDueSubscriptionDeliveries,
+  fetchSupabaseSubscriptionDeliveryById,
+  insertSupabaseRow, updateSupabaseRow, deleteSupabaseRow,
+  selectSupabaseOne, selectSupabaseMany, countSupabaseRows,
+  mapPaymentRow, paymentToRow, refundToRow,
+  insertSupabasePaymentEvent, markSupabasePaymentEventProcessed,
+  mapPlatformRule, platformRuleToRow,
+  mapCouponRow, couponToRow, insertSupabaseCohortMembers, insertSupabaseCouponRedemption,
+  mapReferralCodeRow, mapReferralRow, referralToRow,
+  mapReferralRuleRow, referralRuleToRow,
+  insertSupabaseReferral, insertSupabaseReferralReward,
+  insertSupabaseParentOrder,
+  fetchSupabaseParentOrderById,
+  updateSupabaseParentOrder,
+  insertSupabaseOrderItems,
+  fetchSupabaseOrderItems,
+  insertSupabaseSubscription,
+  fetchSupabaseSubscriptionById,
+  fetchSupabaseSubscriptionsByUser,
+  updateSupabaseSubscription,
+  insertSupabaseSubscriptionDeliveries,
+  fetchSupabaseSubscriptionDeliveries,
+  insertSupabaseWallet,
+  fetchSupabaseWalletById,
+  fetchSupabaseWalletsByUser,
+  insertSupabaseWalletTransaction,
+  fetchSupabaseWalletTransactions
 } from './supabase.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DB_PATH = path.join(__dirname, '..', 'data', 'db.json');
+// LOCAL_DB_PATH lets the test suite use a throwaway file instead of the developer's
+// own data/db.json, so running tests never resets local credentials or orders.
+const DB_PATH = process.env.LOCAL_DB_PATH
+  ? path.resolve(process.env.LOCAL_DB_PATH)
+  : path.join(__dirname, '..', 'data', 'db.json');
 const DATA_DIR = path.dirname(DB_PATH);
 
 const CREDENTIAL_PLACEHOLDER = 'CHANGE_ME';
@@ -189,33 +222,78 @@ function normalizeDb(db) {
   if (!Array.isArray(db.users)) db.users = [];
   if (!Array.isArray(db.userSessions)) db.userSessions = [];
   if (!Array.isArray(db.checkouts)) db.checkouts = [];
+  db.checkouts = db.checkouts.map((c) => ({
+    ...c,
+    // Checkouts written before the snapshot existed fulfil through the legacy path.
+    cartSnapshot: c.cartSnapshot ?? null,
+    parentOrderId: c.parentOrderId ?? null,
+    platform: c.platform ?? null
+  }));
   if (!Array.isArray(db.orders)) db.orders = [];
   if (!Array.isArray(db.products)) db.products = [];
+  if (!Array.isArray(db.parentOrders)) db.parentOrders = [];
+  if (!Array.isArray(db.orderItems)) db.orderItems = [];
+  if (!Array.isArray(db.subscriptions)) db.subscriptions = [];
+  if (!Array.isArray(db.subscriptionDeliveries)) db.subscriptionDeliveries = [];
+  if (!Array.isArray(db.wallets)) db.wallets = [];
+  if (!Array.isArray(db.walletTransactions)) db.walletTransactions = [];
+  if (!Array.isArray(db.payments)) db.payments = [];
+  if (!Array.isArray(db.paymentEvents)) db.paymentEvents = [];
+  if (!Array.isArray(db.refunds)) db.refunds = [];
+  if (!Array.isArray(db.platformPriceRules)) db.platformPriceRules = [];
+  if (!Array.isArray(db.coupons)) db.coupons = [];
+  if (!Array.isArray(db.couponCohortMembers)) db.couponCohortMembers = [];
+  if (!Array.isArray(db.couponRedemptions)) db.couponRedemptions = [];
+  if (!Array.isArray(db.referralCodes)) db.referralCodes = [];
+  if (!Array.isArray(db.referrals)) db.referrals = [];
+  if (!Array.isArray(db.referralRewards)) db.referralRewards = [];
+  if (!Array.isArray(db.referralRules)) db.referralRules = [];
+
   db.products = db.products.map((p) => ({
     ...p,
     deliverLater: Boolean(p.deliverLater),
-    gstRate: Number(p.gstRate ?? 5)
+    gstRate: Number(p.gstRate ?? 5),
+    // Derive the new taxonomy from the legacy boolean when absent, so products
+    // written before the migration keep behaving identically.
+    fulfillmentKind: p.fulfillmentKind || (p.deliverLater ? 'DELIVERY_IN_DAYS' : 'IMMEDIATE'),
+    subscribable: Boolean(p.subscribable),
+    sellableOnce: p.sellableOnce !== false
   }));
+
   db.orders = db.orders.map((order) => ({
     ...order,
     subtotalAmount: Number(order.subtotalAmount ?? order.totalAmount ?? 0),
-    taxAmount: Number(order.taxAmount ?? 0)
+    taxAmount: Number(order.taxAmount ?? 0),
+    // Legacy orders have no sub_order_type; infer it so the status machine can
+    // still reason about them. parentOrderId stays null until backfilled.
+    subOrderType:
+      order.subOrderType ||
+      (order.fulfillmentType === 'delivery' ? 'DELIVERY_IN_DAYS' : 'IMMEDIATE'),
+    parentOrderId: order.parentOrderId ?? null,
+    scheduledFor: order.scheduledFor ?? null,
+    subscriptionId: order.subscriptionId ?? null,
+    subscriptionDeliveryId: order.subscriptionDeliveryId ?? null
   }));
   return db;
 }
 
 export function getDb() {
+  // INITIAL_DATA predates the newer collections, so it must go through
+  // normalizeDb like any other read — otherwise a brand-new database is missing
+  // them and the first write throws.
   if (!fs.existsSync(DB_PATH)) {
-    saveDb(INITIAL_DATA);
-    return INITIAL_DATA;
+    const seeded = normalizeDb({ ...INITIAL_DATA });
+    saveDb(seeded);
+    return seeded;
   }
   try {
     const raw = fs.readFileSync(DB_PATH, 'utf-8');
     return normalizeDb(JSON.parse(raw));
   } catch (err) {
     console.error("Error reading local database, restoring initial data:", err);
-    saveDb(INITIAL_DATA);
-    return INITIAL_DATA;
+    const seeded = normalizeDb({ ...INITIAL_DATA });
+    saveDb(seeded);
+    return seeded;
   }
 }
 
@@ -642,4 +720,431 @@ export async function dbUpdateCheckout(id, updates) {
   };
   saveDb(db);
   return db.checkouts[idx];
+}
+
+
+// ----------------- PARENT ORDERS / SUB-ORDER ITEMS -----------------
+
+export async function dbCreateParentOrder(parentOrder) {
+  if (isSupabaseActive()) return await insertSupabaseParentOrder(parentOrder);
+  const db = getDb();
+  db.parentOrders.push(parentOrder);
+  saveDb(db);
+  return parentOrder;
+}
+
+export async function dbGetParentOrderById(id) {
+  if (isSupabaseActive()) return await fetchSupabaseParentOrderById(id);
+  const db = getDb();
+  return db.parentOrders.find((p) => p.id === id) || null;
+}
+
+export async function dbUpdateParentOrder(id, updates) {
+  if (isSupabaseActive()) return await updateSupabaseParentOrder(id, updates);
+  const db = getDb();
+  const idx = db.parentOrders.findIndex((p) => p.id === id);
+  if (idx === -1) return null;
+  db.parentOrders[idx] = { ...db.parentOrders[idx], ...updates, updatedAt: new Date().toISOString() };
+  saveDb(db);
+  return db.parentOrders[idx];
+}
+
+export async function dbCreateOrderItems(rows) {
+  if (!rows.length) return [];
+  if (isSupabaseActive()) return await insertSupabaseOrderItems(rows);
+  const db = getDb();
+  db.orderItems.push(...rows);
+  saveDb(db);
+  return rows;
+}
+
+export async function dbGetOrderItemsBySubOrderIds(ids) {
+  if (!ids.length) return [];
+  if (isSupabaseActive()) return await fetchSupabaseOrderItems(ids);
+  const db = getDb();
+  return db.orderItems.filter((i) => ids.includes(i.subOrderId));
+}
+
+// ----------------- SUBSCRIPTIONS -----------------
+
+export async function dbCreateSubscription(subscription) {
+  if (isSupabaseActive()) return await insertSupabaseSubscription(subscription);
+  const db = getDb();
+  db.subscriptions.push(subscription);
+  saveDb(db);
+  return subscription;
+}
+
+export async function dbGetSubscriptionById(id) {
+  if (isSupabaseActive()) return await fetchSupabaseSubscriptionById(id);
+  const db = getDb();
+  return db.subscriptions.find((s) => s.id === id) || null;
+}
+
+export async function dbGetSubscriptionsByUserId(userId) {
+  if (isSupabaseActive()) return await fetchSupabaseSubscriptionsByUser(userId);
+  const db = getDb();
+  return db.subscriptions.filter((s) => s.userId === userId);
+}
+
+export async function dbUpdateSubscription(id, updates) {
+  if (isSupabaseActive()) return await updateSupabaseSubscription(id, updates);
+  const db = getDb();
+  const idx = db.subscriptions.findIndex((s) => s.id === id);
+  if (idx === -1) return null;
+  db.subscriptions[idx] = { ...db.subscriptions[idx], ...updates, updatedAt: new Date().toISOString() };
+  saveDb(db);
+  return db.subscriptions[idx];
+}
+
+export async function dbCreateSubscriptionDeliveries(rows) {
+  if (!rows.length) return [];
+  if (isSupabaseActive()) return await insertSupabaseSubscriptionDeliveries(rows);
+  const db = getDb();
+  db.subscriptionDeliveries.push(...rows);
+  saveDb(db);
+  return rows;
+}
+
+export async function dbGetSubscriptionDeliveries(subscriptionId) {
+  if (isSupabaseActive()) return await fetchSupabaseSubscriptionDeliveries(subscriptionId);
+  const db = getDb();
+  return db.subscriptionDeliveries
+    .filter((d) => d.subscriptionId === subscriptionId)
+    .sort((a, b) => a.sequenceNo - b.sequenceNo);
+}
+
+// ----------------- WALLET -----------------
+
+export async function dbCreateWallet(wallet) {
+  if (isSupabaseActive()) return await insertSupabaseWallet(wallet);
+  const db = getDb();
+  db.wallets.push(wallet);
+  saveDb(db);
+  return wallet;
+}
+
+export async function dbGetWalletById(id) {
+  if (isSupabaseActive()) return await fetchSupabaseWalletById(id);
+  const db = getDb();
+  return db.wallets.find((w) => w.id === id) || null;
+}
+
+export async function dbGetWalletsByUserId(userId) {
+  if (isSupabaseActive()) return await fetchSupabaseWalletsByUser(userId);
+  const db = getDb();
+  return db.wallets.filter((w) => w.userId === userId);
+}
+
+/**
+ * Append-only ledger write. The idempotency key is the duplicate guard: a repeat
+ * with the same key is a no-op that returns the original row, so a retried
+ * fulfilment can never credit or debit twice.
+ */
+export async function dbAppendWalletTransaction(txn) {
+  if (isSupabaseActive()) return await insertSupabaseWalletTransaction(txn);
+  const db = getDb();
+  const existing = db.walletTransactions.find((t) => t.idempotencyKey === txn.idempotencyKey);
+  if (existing) return existing;
+  db.walletTransactions.push(txn);
+  saveDb(db);
+  return txn;
+}
+
+export async function dbGetWalletTransactions(walletId) {
+  if (isSupabaseActive()) return await fetchSupabaseWalletTransactions(walletId);
+  const db = getDb();
+  return db.walletTransactions.filter((t) => t.walletId === walletId);
+}
+
+/** Balance is always derived from the ledger, never stored as a mutable number. */
+export async function dbGetWalletBalance(walletId) {
+  const rows = await dbGetWalletTransactions(walletId);
+  const balance = rows.reduce(
+    (sum, t) => sum + (t.direction === 'CREDIT' ? Number(t.amount) : -Number(t.amount)),
+    0
+  );
+  return Math.round((balance + Number.EPSILON) * 100) / 100;
+}
+
+
+/**
+ * Atomic claim on a planned delivery, mirroring dbClaimCheckout. Exactly one
+ * caller can move a delivery out of PLANNED, which is what stops a retry or a
+ * second worker creating a duplicate sub-order for the same delivery.
+ */
+export async function dbClaimSubscriptionDelivery(id, fromStatuses, toStatus) {
+  if (isSupabaseActive()) {
+    return await claimSupabaseSubscriptionDelivery(id, fromStatuses, toStatus);
+  }
+  const db = getDb();
+  const idx = db.subscriptionDeliveries.findIndex((d) => d.id === id);
+  if (idx === -1 || !fromStatuses.includes(db.subscriptionDeliveries[idx].status)) return null;
+  db.subscriptionDeliveries[idx] = { ...db.subscriptionDeliveries[idx], status: toStatus };
+  saveDb(db);
+  return db.subscriptionDeliveries[idx];
+}
+
+export async function dbUpdateSubscriptionDelivery(id, updates) {
+  if (isSupabaseActive()) return await updateSupabaseSubscriptionDelivery(id, updates);
+  const db = getDb();
+  const idx = db.subscriptionDeliveries.findIndex((d) => d.id === id);
+  if (idx === -1) return null;
+  db.subscriptionDeliveries[idx] = { ...db.subscriptionDeliveries[idx], ...updates };
+  saveDb(db);
+  return db.subscriptionDeliveries[idx];
+}
+
+export async function dbGetSubscriptionDeliveryById(id) {
+  if (isSupabaseActive()) return await fetchSupabaseSubscriptionDeliveryById(id);
+  const db = getDb();
+  return db.subscriptionDeliveries.find((d) => d.id === id) || null;
+}
+
+/** Planned deliveries whose scheduled date has arrived. */
+export async function dbGetDueSubscriptionDeliveries(onDate, limit = 200) {
+  if (isSupabaseActive()) return await fetchSupabaseDueSubscriptionDeliveries(onDate, limit);
+  const db = getDb();
+  return db.subscriptionDeliveries
+    .filter((d) => d.status === 'PLANNED' && d.scheduledDate <= onDate)
+    .sort((a, b) => (a.scheduledDate < b.scheduledDate ? -1 : 1))
+    .slice(0, limit);
+}
+
+
+// ----------------- PAYMENTS -----------------
+
+export async function dbCreatePayment(payment) {
+  if (isSupabaseActive()) return await insertSupabaseRow('payments', paymentToRow(payment), mapPaymentRow);
+  const db = getDb();
+  db.payments.push(payment);
+  saveDb(db);
+  return payment;
+}
+
+export async function dbGetPaymentByGatewayOrderId(gatewayOrderId) {
+  if (isSupabaseActive()) {
+    return await selectSupabaseOne('payments', { gateway_order_id: gatewayOrderId }, mapPaymentRow);
+  }
+  const db = getDb();
+  return db.payments.find((p) => p.gatewayOrderId === gatewayOrderId) || null;
+}
+
+export async function dbUpdatePayment(id, updates) {
+  if (isSupabaseActive()) {
+    return await updateSupabaseRow('payments', id, paymentToRow({ ...updates, updatedAt: new Date().toISOString() }), mapPaymentRow);
+  }
+  const db = getDb();
+  const idx = db.payments.findIndex((p) => p.id === id);
+  if (idx === -1) return null;
+  db.payments[idx] = { ...db.payments[idx], ...updates, updatedAt: new Date().toISOString() };
+  saveDb(db);
+  return db.payments[idx];
+}
+
+/**
+ * Records a webhook delivery. The gateway event id is unique, so a redelivery
+ * returns { duplicate: true } and the caller can skip the work entirely.
+ */
+export async function dbRecordPaymentEvent(event) {
+  if (isSupabaseActive()) return await insertSupabasePaymentEvent(event);
+  const db = getDb();
+  const existing = db.paymentEvents.find((e) => e.gatewayEventId === event.gatewayEventId);
+  if (existing) return { event: existing, duplicate: true };
+  db.paymentEvents.push(event);
+  saveDb(db);
+  return { event, duplicate: false };
+}
+
+export async function dbMarkPaymentEventProcessed(gatewayEventId, result) {
+  if (isSupabaseActive()) return await markSupabasePaymentEventProcessed(gatewayEventId, result);
+  const db = getDb();
+  const idx = db.paymentEvents.findIndex((e) => e.gatewayEventId === gatewayEventId);
+  if (idx === -1) return null;
+  db.paymentEvents[idx] = {
+    ...db.paymentEvents[idx],
+    result: String(result || '').slice(0, 200),
+    processedAt: new Date().toISOString()
+  };
+  saveDb(db);
+  return db.paymentEvents[idx];
+}
+
+export async function dbCreateRefund(refund) {
+  if (isSupabaseActive()) return await insertSupabaseRow('refunds', refundToRow(refund), (d) => d);
+  const db = getDb();
+  db.refunds.push(refund);
+  saveDb(db);
+  return refund;
+}
+
+// ----------------- PLATFORM PRICING -----------------
+
+export async function dbGetPlatformPriceRules() {
+  if (isSupabaseActive()) return await selectSupabaseMany('platform_price_rules', { is_active: true }, mapPlatformRule);
+  const db = getDb();
+  return db.platformPriceRules.filter((r) => r.isActive !== false);
+}
+
+export async function dbCreatePlatformPriceRule(rule) {
+  if (isSupabaseActive()) return await insertSupabaseRow('platform_price_rules', platformRuleToRow(rule), mapPlatformRule);
+  const db = getDb();
+  db.platformPriceRules.push(rule);
+  saveDb(db);
+  return rule;
+}
+
+// ----------------- COUPONS -----------------
+
+export async function dbCreateCoupon(coupon) {
+  if (isSupabaseActive()) return await insertSupabaseRow('coupons', couponToRow(coupon), mapCouponRow);
+  const db = getDb();
+  db.coupons.push(coupon);
+  saveDb(db);
+  return coupon;
+}
+
+export async function dbGetCouponByCode(code) {
+  const normalized = String(code || '').trim().toUpperCase();
+  if (!normalized) return null;
+  if (isSupabaseActive()) return await selectSupabaseOne('coupons', { code: normalized }, mapCouponRow);
+  const db = getDb();
+  return db.coupons.find((c) => c.code === normalized) || null;
+}
+
+export async function dbGetCoupons() {
+  if (isSupabaseActive()) return await selectSupabaseMany('coupons', {}, mapCouponRow);
+  return getDb().coupons;
+}
+
+export async function dbAddCouponCohortMembers(couponId, userIds) {
+  if (isSupabaseActive()) return await insertSupabaseCohortMembers(couponId, userIds);
+  const db = getDb();
+  for (const userId of userIds) {
+    if (!db.couponCohortMembers.some((m) => m.couponId === couponId && m.userId === userId)) {
+      db.couponCohortMembers.push({ couponId, userId });
+    }
+  }
+  saveDb(db);
+  return userIds.length;
+}
+
+export async function dbIsCouponCohortMember(couponId, userId) {
+  if (!userId) return false;
+  if (isSupabaseActive()) {
+    const row = await selectSupabaseOne('coupon_cohort_members', { coupon_id: couponId, user_id: userId }, (d) => d);
+    return Boolean(row);
+  }
+  const db = getDb();
+  return db.couponCohortMembers.some((m) => m.couponId === couponId && m.userId === userId);
+}
+
+export async function dbCountCouponRedemptions(couponId) {
+  if (isSupabaseActive()) return await countSupabaseRows('coupon_redemptions', { coupon_id: couponId });
+  return getDb().couponRedemptions.filter((r) => r.couponId === couponId).length;
+}
+
+/**
+ * Claims a redemption. The unique (coupon_id, user_key) index is the lock: a
+ * concurrent second attempt loses here, before any discount is applied.
+ * Returns null when the coupon was already redeemed by this user.
+ */
+export async function dbClaimCouponRedemption(redemption) {
+  if (isSupabaseActive()) return await insertSupabaseCouponRedemption(redemption);
+  const db = getDb();
+  const clash = db.couponRedemptions.find(
+    (r) => r.couponId === redemption.couponId && r.userKey === redemption.userKey
+  );
+  if (clash) return null;
+  db.couponRedemptions.push(redemption);
+  saveDb(db);
+  return redemption;
+}
+
+export async function dbReleaseCouponRedemption(id) {
+  if (isSupabaseActive()) return await deleteSupabaseRow('coupon_redemptions', id);
+  const db = getDb();
+  db.couponRedemptions = db.couponRedemptions.filter((r) => r.id !== id);
+  saveDb(db);
+  return true;
+}
+
+// ----------------- REFERRALS -----------------
+
+export async function dbCreateReferralCode(row) {
+  if (isSupabaseActive()) return await insertSupabaseRow('referral_codes', {
+    id: row.id, user_id: row.userId, code: row.code, is_active: row.isActive, created_at: row.createdAt
+  }, mapReferralCodeRow);
+  const db = getDb();
+  db.referralCodes.push(row);
+  saveDb(db);
+  return row;
+}
+
+export async function dbGetReferralCodeByCode(code) {
+  const normalized = String(code || '').trim().toUpperCase();
+  if (!normalized) return null;
+  if (isSupabaseActive()) return await selectSupabaseOne('referral_codes', { code: normalized }, mapReferralCodeRow);
+  const db = getDb();
+  return db.referralCodes.find((r) => r.code === normalized) || null;
+}
+
+export async function dbGetReferralCodeByUserId(userId) {
+  if (isSupabaseActive()) return await selectSupabaseOne('referral_codes', { user_id: userId }, mapReferralCodeRow);
+  const db = getDb();
+  return db.referralCodes.find((r) => r.userId === userId) || null;
+}
+
+/** Unique on referred_user_id: a person can only ever be referred once. */
+export async function dbCreateReferral(referral) {
+  if (isSupabaseActive()) return await insertSupabaseReferral(referral);
+  const db = getDb();
+  if (db.referrals.some((r) => r.referredUserId === referral.referredUserId)) return null;
+  db.referrals.push(referral);
+  saveDb(db);
+  return referral;
+}
+
+export async function dbGetReferralByReferredUserId(userId) {
+  if (isSupabaseActive()) return await selectSupabaseOne('referrals', { referred_user_id: userId }, mapReferralRow);
+  const db = getDb();
+  return db.referrals.find((r) => r.referredUserId === userId) || null;
+}
+
+export async function dbGetReferralsByReferrer(userId) {
+  if (isSupabaseActive()) return await selectSupabaseMany('referrals', { referrer_user_id: userId }, mapReferralRow);
+  return getDb().referrals.filter((r) => r.referrerUserId === userId);
+}
+
+export async function dbUpdateReferral(id, updates) {
+  if (isSupabaseActive()) return await updateSupabaseRow('referrals', id, referralToRow(updates), mapReferralRow);
+  const db = getDb();
+  const idx = db.referrals.findIndex((r) => r.id === id);
+  if (idx === -1) return null;
+  db.referrals[idx] = { ...db.referrals[idx], ...updates };
+  saveDb(db);
+  return db.referrals[idx];
+}
+
+/** Unique on referral_id: the reward for one referral can only be granted once. */
+export async function dbCreateReferralReward(reward) {
+  if (isSupabaseActive()) return await insertSupabaseReferralReward(reward);
+  const db = getDb();
+  if (db.referralRewards.some((r) => r.referralId === reward.referralId)) return null;
+  db.referralRewards.push(reward);
+  saveDb(db);
+  return reward;
+}
+
+export async function dbGetReferralRules() {
+  if (isSupabaseActive()) return await selectSupabaseMany('referral_rules', { is_active: true }, mapReferralRuleRow);
+  return getDb().referralRules.filter((r) => r.isActive !== false);
+}
+
+export async function dbCreateReferralRule(rule) {
+  if (isSupabaseActive()) return await insertSupabaseRow('referral_rules', referralRuleToRow(rule), mapReferralRuleRow);
+  const db = getDb();
+  db.referralRules.push(rule);
+  saveDb(db);
+  return rule;
 }

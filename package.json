@@ -3,21 +3,27 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "server": "node server/index.js",
     "dev:all": "concurrently \"node server/index.js\" \"vite\"",
     "build": "vite build",
     "start": "NODE_ENV=production node server/index.js",
-    "test": "node run-all-tests.js",
+    "test": "npm run test:unit && node run-all-tests.js",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:unit": "node --test 'test/unit/*.test.js'"
   },
   "dependencies": {
+    "@fontsource-variable/dm-sans": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource/instrument-serif": "^5.3.0",
     "@google-cloud/storage": "^8.1.0",
     "@supabase/supabase-js": "^2.116.0",
     "canvas-confetti": "^1.9.4",
-    "concurrently": "^10.0.5",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
@@ -27,15 +33,19 @@
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "sharp": "^0.35.4"
+    "react-router-dom": "^7.18.4"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
     "oxlint": "^1.81.0",
     "tailwindcss": "^4.3.3",
     "vite": "^8.3.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

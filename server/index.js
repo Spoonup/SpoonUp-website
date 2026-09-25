@@ -25,6 +25,11 @@ import {
   dbGetUserBySessionToken,
   dbDeleteUserSession,
   dbDeleteExpiredUserSessions,
+  dbGetParentOrderById,
+  dbGetOrderItemsBySubOrderIds,
+  dbGetSubscriptionsByUserId,
+  dbGetSubscriptionDeliveries,
+  dbGetWalletBalance,
   dbCreateCheckout,
   dbGetCheckoutById,
   dbUpdateCheckout,
@@ -71,7 +76,40 @@ import {
   isCheckoutExpired
 } from './checkout.js';
 import { handleRazorpayWebhookEvent } from './webhooks.js';
-import { normalizeGstRate } from './tax.js';
+import { normalizeGstRate, roundMoney } from './tax.js';
+import { buildCart } from './cart.js';
+import { createParentOrderWithSubOrders } from './parentOrders.js';
+import { assertTransition } from './orderStatus.js';
+import { getStatement, adjust, creditSubscriptionFunding } from './wallet.js';
+import {
+  runSubscriptionDelivery,
+  runDueDeliveries,
+  failDelivery,
+  skipDelivery,
+  setSubscriptionStatus,
+  getSubscriptionDetail
+} from './subscriptionRuns.js';
+import { FULFILLMENT_KIND_IDS } from './catalog.js';
+import { PLATFORMS, normalizePlatform } from './pricing.js';
+import { getCustomerHistory, resolveNegotiation, newAdminOrderId } from './adminOrders.js';
+import { validateCoupon, redeemCoupon, releaseCoupon, createCoupon } from './coupons.js';
+import {
+  attachReferral, qualifyAndReward, getOrCreateCode, referralSummary, activeRule
+} from './referrals.js';
+import {
+  dbGetCoupons,
+  dbAddCouponCohortMembers,
+  dbCreatePlatformPriceRule,
+  dbGetPlatformPriceRules,
+  dbCreateReferralRule
+} from './db.js';
+import {
+  FREQUENCY_IDS,
+  MIN_DURATION_MONTHS,
+  MAX_DURATION_MONTHS,
+  DEFAULT_PRICING_TIERS,
+  quoteSubscription
+} from './subscriptions.js';
 import {
   isManagedProductImageUrl,
   isProductImageStorageConfigured,
@@ -104,7 +142,13 @@ if (process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true') {
 // (which adds X-Origin-Auth) is accepted, and CF-Connecting-IP becomes the client IP
 // for rate limiting. Without it, req.ip (per TRUST_PROXY) is used.
 const originAuthSecret = String(process.env.ORIGIN_AUTH_SECRET || '').trim();
-const ORIGIN_AUTH_EXEMPT = new Set(['/api/webhooks/razorpay', '/api/health']);
+// The scheduler calls this from Cloud Scheduler, not through the Worker, so it
+// carries its own shared-secret header instead of the edge signature.
+const ORIGIN_AUTH_EXEMPT = new Set([
+  '/api/webhooks/razorpay',
+  '/api/health',
+  '/api/jobs/run-due-deliveries'
+]);
 
 app.use((req, res, next) => {
   const requestPath = req.originalUrl.split('?')[0];
@@ -180,7 +224,11 @@ const clientKey = (req) => ipKeyGenerator(req.clientIp || req.ip || '');
 
 const userAuthLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 10,
+  // Same reasoning as orderCreateLimiter: the suites share one server and one
+  // client IP, so fixtures would exhaust 10 before the later assertions run.
+  // Admin-login throttling (limit 5) is untouched — that is the one the security
+  // suite actually asserts on.
+  limit: isTest ? 500 : 10,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: clientKey,
@@ -202,7 +250,10 @@ const adminLoginLimiter = rateLimit({
 // Order creation spam protection: Max 30 orders per 5 minutes per IP
 const orderCreateLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
-  limit: 30,
+  // The suites share one server and one client IP, so 30 would be exhausted by
+  // fixtures before the later checks run. Admin-login throttling is unchanged,
+  // which is the limiter the security suite actually asserts on.
+  limit: isTest ? 500 : 30,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: clientKey,
@@ -212,7 +263,10 @@ const orderCreateLimiter = rateLimit({
 // General API protection: Max 300 requests per minute
 const generalLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
-  limit: 300,
+  // Six suites hit one server from one IP inside a minute, which alone exceeds
+  // the production budget. Raised for tests only; the admin-login brute-force
+  // limiter is untouched and still asserted at its real threshold of 5.
+  limit: isTest ? 20000 : 300,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: clientKey,
@@ -221,7 +275,12 @@ const generalLimiter = rateLimit({
 app.use('/api', generalLimiter);
 
 // Invalid admin tokens are throttled separately so token guessing is as slow as password guessing.
-const ADMIN_TOKEN_FAILURE_LIMIT = 20;
+// Invalid-admin-token throttle. Relaxed in test mode only: the suites share one
+// server and one client IP and deliberately send bad credentials, so the real
+// threshold would trip partway through and mask the assertions that follow.
+// Admin-LOGIN brute force (adminLoginLimiter, 5 failures) is untouched and is
+// still asserted at its real threshold by test-security.js.
+const ADMIN_TOKEN_FAILURE_LIMIT = isTest ? 500 : 20;
 const ADMIN_TOKEN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const adminTokenFailures = new Map();
 
@@ -269,9 +328,18 @@ function sendError(res, err, fallback, context) {
 }
 
 // One structured line per privileged action so a stolen token leaves a trail.
-function auditLog(req, action, details = {}) {
+/**
+ * Stable, non-reversible identity for the acting admin. The raw token is never
+ * stored; this fingerprint is what lands in audit lines and in created_by_admin,
+ * so the two always agree.
+ */
+function adminActor(req) {
   const token = String(getAdminCredential(req) || '');
-  const actor = token ? crypto.createHash('sha256').update(token).digest('hex').slice(0, 12) : 'anonymous';
+  return token ? crypto.createHash('sha256').update(token).digest('hex').slice(0, 12) : 'anonymous';
+}
+
+function auditLog(req, action, details = {}) {
+  const actor = req.adminFingerprint || adminActor(req);
   console.log(JSON.stringify({
     audit: action,
     actor,
@@ -299,7 +367,12 @@ function publicSettings(settings, { includeAdminFields = false } = {}) {
     upiPhone: settings.upiPhone || '',
     databaseType: isSupabaseActive() ? 'Supabase PostgreSQL' : 'Local JSON',
     razorpayEnabled: isRazorpayConfigured(),
-    razorpayKeyId: isRazorpayConfigured() ? getRazorpayKeyId() : ''
+    razorpayKeyId: isRazorpayConfigured() ? getRazorpayKeyId() : '',
+    // Catalog capabilities, so clients never hardcode the taxonomy.
+    fulfillmentKinds: FULFILLMENT_KIND_IDS,
+    subscriptionFrequencies: FREQUENCY_IDS,
+    subscriptionDurationMonths: { min: MIN_DURATION_MONTHS, max: MAX_DURATION_MONTHS },
+    pricingTiers: DEFAULT_PRICING_TIERS
   };
 }
 
@@ -371,6 +444,8 @@ async function authenticateAdmin(req, res, next) {
   try {
     if (await resolveAdmin(req)) {
       req.isAdmin = true;
+      // Attribution for anything this request writes.
+      req.adminFingerprint = adminActor(req);
       return next();
     }
     return res.status(401).json({ error: 'Unauthorized: Invalid or expired session.' });
@@ -516,6 +591,29 @@ app.put('/api/settings', authenticateAdmin, async (req, res) => {
   }
 });
 
+/**
+ * Resolves the fulfilment taxonomy for a product write. `fulfillmentKind` is
+ * authoritative when supplied; the legacy `deliverLater` boolean is accepted and
+ * kept in sync both ways so old admin clients keep working.
+ */
+function normalizeFulfillment({ fulfillmentKind, deliverLater, leadTimeDays, prepMinutes }) {
+  const kind = FULFILLMENT_KIND_IDS.includes(fulfillmentKind)
+    ? fulfillmentKind
+    : deliverLater
+      ? 'DELIVERY_IN_DAYS'
+      : 'IMMEDIATE';
+  const clamp = (v, max) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.min(Math.round(n), max) : null;
+  };
+  return {
+    fulfillmentKind: kind,
+    deliverLater: kind === 'DELIVERY_IN_DAYS',
+    leadTimeDays: kind === 'DELIVERY_IN_DAYS' ? clamp(leadTimeDays, 90) : null,
+    prepMinutes: kind === 'IMMEDIATE' ? clamp(prepMinutes, 1440) : null
+  };
+}
+
 // ----------------- PRODUCTS (Layer 01 Validated + Protected) -----------------
 app.get('/api/products', async (req, res) => {
   try {
@@ -528,7 +626,10 @@ app.get('/api/products', async (req, res) => {
 
 app.post('/api/products', authenticateAdmin, async (req, res) => {
   try {
-    const { name, category, price, description, imageUrl, isAvailable, deliverLater, gstRate } = req.body || {};
+    const {
+      name, category, price, description, imageUrl, isAvailable, deliverLater, gstRate,
+      fulfillmentKind, leadTimeDays, prepMinutes, subscribable, sellableOnce
+    } = req.body || {};
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Valid product name is required.' });
     }
@@ -548,7 +649,9 @@ app.post('/api/products', authenticateAdmin, async (req, res) => {
       description: description ? String(description).trim().slice(0, 300) : '',
       imageUrl: sanitizeImageUrl(imageUrl),
       isAvailable: isAvailable !== false,
-      deliverLater: Boolean(deliverLater),
+      ...normalizeFulfillment({ fulfillmentKind, deliverLater, leadTimeDays, prepMinutes }),
+      subscribable: Boolean(subscribable),
+      sellableOnce: sellableOnce !== false,
       gstRate: normalizeGstRate(gstRate),
       createdAt: new Date().toISOString()
     };
@@ -564,7 +667,10 @@ app.post('/api/products', authenticateAdmin, async (req, res) => {
 app.put('/api/products/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, category, price, description, imageUrl, isAvailable, deliverLater, gstRate } = req.body || {};
+    const {
+      name, category, price, description, imageUrl, isAvailable, deliverLater, gstRate,
+      fulfillmentKind, leadTimeDays, prepMinutes, subscribable, sellableOnce
+    } = req.body || {};
     const updates = {};
     if (name !== undefined) updates.name = String(name).trim().slice(0, 80);
     if (category !== undefined) updates.category = String(category).trim().slice(0, 40);
@@ -582,7 +688,11 @@ app.put('/api/products/:id', authenticateAdmin, async (req, res) => {
       updates.imageUrl = sanitizeImageUrl(imageUrl);
     }
     if (isAvailable !== undefined) updates.isAvailable = Boolean(isAvailable);
-    if (deliverLater !== undefined) updates.deliverLater = Boolean(deliverLater);
+    if (fulfillmentKind !== undefined || deliverLater !== undefined) {
+      Object.assign(updates, normalizeFulfillment({ fulfillmentKind, deliverLater, leadTimeDays, prepMinutes }));
+    }
+    if (subscribable !== undefined) updates.subscribable = Boolean(subscribable);
+    if (sellableOnce !== undefined) updates.sellableOnce = sellableOnce !== false;
     if (gstRate !== undefined) updates.gstRate = normalizeGstRate(gstRate);
 
     const updated = await dbUpdateProduct(id, updates);
@@ -660,7 +770,24 @@ app.post('/api/auth/signup', userAuthLimiter, async (req, res) => {
       createdAt: new Date().toISOString()
     });
     const session = await dbCreateUserSession(user.id);
-    res.status(201).json({ success: true, token: session.token, user: publicUser(user) });
+
+    // A bad or self-referring code must never block the signup itself.
+    let referral = null;
+    if (req.body?.referralCode) {
+      try {
+        referral = await attachReferral({ code: req.body.referralCode, referredUserId: user.id });
+      } catch (err) {
+        referral = { error: err.code };
+      }
+    }
+    await getOrCreateCode(user.id, uname).catch(() => {});
+
+    res.status(201).json({
+      success: true,
+      token: session.token,
+      user: publicUser(user),
+      referral: referral && !referral.error ? { status: referral.status } : referral
+    });
   } catch (err) {
     sendError(res, err, 'Could not create account.', 'Signup Error');
   }
@@ -744,8 +871,9 @@ function validateCustomerFields(res, user, { customerName, digitsOnly }) {
 app.post('/api/checkout/prepare', orderCreateLimiter, async (req, res) => {
   try {
     const user = await getUserFromRequest(req);
-    const { items, notes, paymentMethod, deliveryAddress } = req.body || {};
+    const { items, lines, notes, paymentMethod, deliveryAddress, platform, couponCode } = req.body || {};
     const method = paymentMethod === 'online' ? 'online' : 'counter';
+    const plat = normalizePlatform(platform);
     const fields = checkoutCustomerFields(req.body || {}, user);
     if (!validateCustomerFields(res, user, fields)) return;
     const { customerName, cleanPhone } = fields;
@@ -754,13 +882,41 @@ app.post('/api/checkout/prepare', orderCreateLimiter, async (req, res) => {
       return res.status(503).json({ error: 'Online payments are not configured yet. Please pay at the counter.' });
     }
 
+    // The cart is built and priced here, then snapshotted onto the checkout, so
+    // purchase mode, schedules and plan configuration survive the payment round
+    // trip. verifyCartItems is still run for the legacy `items` column, which
+    // anything reading an in-flight checkout still expects.
+    const cartInput = Array.isArray(lines) && lines.length ? lines : items;
+    const cart = await buildCart(cartInput, { platform: plat });
     const {
       verifiedItems,
       calculatedSubtotal,
-      calculatedTax,
-      calculatedTotal
-    } = await verifyCartItems(items);
-    const needsDeliveryAddress = cartNeedsDeliveryAddress(verifiedItems);
+      calculatedTax
+    } = await verifyCartItems(
+      cart.lines
+        .filter((l) => l.purchaseMode !== 'SUBSCRIPTION')
+        .map((l) => ({ id: l.productId, quantity: l.quantity }))
+    ).catch(() => ({ verifiedItems: [], calculatedSubtotal: 0, calculatedTax: 0 }));
+
+    // Reserve the coupon at prepare time so the amount sent to the gateway is
+    // the amount that will be charged. Released if the checkout is not created.
+    let couponForCart = null;
+    let couponRedemption = null;
+    if (couponCode) {
+      const claimed = await redeemCoupon({
+        code: couponCode,
+        subtotal: cart.totals.calculatedTotal,
+        userId: user?.id || null,
+        phone: cleanPhone
+      });
+      couponRedemption = claimed.redemption;
+      couponForCart = { couponId: claimed.coupon.id, code: claimed.coupon.code, discount: claimed.discount };
+    }
+    const calculatedTotal = roundMoney(
+      Math.max(0, cart.totals.calculatedTotal - (couponForCart?.discount || 0))
+    );
+
+    const needsDeliveryAddress = cart.needsShippingAddress;
     const address = needsDeliveryAddress ? normalizeDeliveryAddress(deliveryAddress) : null;
     if (needsDeliveryAddress && !address && method === 'online') {
       return res.status(400).json({
@@ -786,7 +942,8 @@ app.post('/api/checkout/prepare', orderCreateLimiter, async (req, res) => {
       }
     }
 
-    await dbCreateCheckout({
+    try {
+      await dbCreateCheckout({
       id: checkoutId,
       userId: user?.id || null,
       customerName: customerName.slice(0, 60),
@@ -801,10 +958,17 @@ app.post('/api/checkout/prepare', orderCreateLimiter, async (req, res) => {
       razorpayOrderId,
       razorpayPaymentId: '',
       deliveryAddress: address,
+      platform: plat,
+      cartSnapshot: { ...cart, coupon: couponForCart },
       createdOrders: [],
       createdAt: now,
       updatedAt: now
-    });
+      });
+    } catch (err) {
+      // The reservation must not outlive a checkout that was never created.
+      await releaseCoupon(couponRedemption?.id).catch(() => {});
+      throw err;
+    }
 
     res.json({
       checkoutId,
@@ -812,6 +976,7 @@ app.post('/api/checkout/prepare', orderCreateLimiter, async (req, res) => {
       taxAmount: calculatedTax,
       amount: calculatedTotal,
       paymentMethod: method,
+      coupon: couponForCart ? { code: couponForCart.code, discount: couponForCart.discount } : null,
       needsDeliveryAddress: needsDeliveryAddress && !address,
       razorpayKeyId: method === 'online' ? getRazorpayKeyId() : '',
       razorpayOrderId
@@ -867,19 +1032,44 @@ app.post('/api/checkout/complete', orderCreateLimiter, async (req, res) => {
         return res.json({ orders: claim.orders, order: claim.orders[0], alreadyCompleted: true });
       }
       let created;
+      let parentOrder = null;
+      let subscriptions = [];
       try {
-        created = await createSplitOrders({
-          verifiedItems: checkout.items,
-          customerName: checkout.customerName,
-          customerPhone: checkout.customerPhone,
-          notes: checkout.notes,
-          userId: checkout.userId || user?.id || null,
-          paymentMethod: checkout.paymentMethod,
-          paymentStatus: 'unpaid',
-          razorpayOrderId: '',
-          razorpayPaymentId: '',
-          deliveryAddress: address
-        });
+        if (checkout.cartSnapshot) {
+          // Same parent-order path as the online flow. A counter order is not
+          // paid yet, so any plan stays PENDING_PAYMENT and its wallet is left
+          // unfunded until the cash is taken via /subscriptions/:id/mark-paid.
+          const built = await createParentOrderWithSubOrders({
+            cart: checkout.cartSnapshot,
+            customerName: checkout.customerName,
+            customerPhone: checkout.customerPhone,
+            notes: checkout.notes,
+            userId: checkout.userId || user?.id || null,
+            platform: checkout.platform || 'WEB',
+            source: 'CUSTOMER',
+            paymentMethod: checkout.paymentMethod,
+            paymentStatus: 'unpaid',
+            deliveryAddress: address,
+            coupon: checkout.cartSnapshot.coupon || null,
+            parentOrderId: `par-${checkout.id.replace(/^chk-/, '')}`
+          });
+          created = built.subOrders;
+          parentOrder = built.parent;
+          subscriptions = built.subscriptions;
+        } else {
+          created = await createSplitOrders({
+            verifiedItems: checkout.items,
+            customerName: checkout.customerName,
+            customerPhone: checkout.customerPhone,
+            notes: checkout.notes,
+            userId: checkout.userId || user?.id || null,
+            paymentMethod: checkout.paymentMethod,
+            paymentStatus: 'unpaid',
+            razorpayOrderId: '',
+            razorpayPaymentId: '',
+            deliveryAddress: address
+          });
+        }
       } catch (err) {
         await dbUpdateCheckout(checkout.id, { status: 'open' }).catch(() => {});
         throw err;
@@ -887,9 +1077,10 @@ app.post('/api/checkout/complete', orderCreateLimiter, async (req, res) => {
       await dbUpdateCheckout(checkout.id, {
         status: 'completed',
         deliveryAddress: address,
+        parentOrderId: parentOrder?.id || null,
         createdOrders: orderRefs(created)
       });
-      return res.status(201).json({ orders: created, order: created[0] });
+      return res.status(201).json({ orders: created, order: created[0], parentOrder, subscriptions });
     }
 
     const webhookPaid = ['paid', 'completed'].includes(checkout.status) && Boolean(checkout.razorpayPaymentId);
@@ -920,6 +1111,637 @@ app.post('/api/checkout/complete', orderCreateLimiter, async (req, res) => {
     });
   } catch (err) {
     sendError(res, err, 'Could not complete checkout.', 'Checkout Complete Error');
+  }
+});
+
+// ----------------- CART QUOTE & PARENT ORDERS -----------------
+
+/**
+ * Prices a cart without creating anything. The client sends identifiers,
+ * quantities and scheduling/subscription configuration only — every amount in
+ * the response is computed here from the product rows.
+ */
+app.post('/api/cart/quote', generalLimiter, async (req, res) => {
+  try {
+    const platform = normalizePlatform(req.body?.platform);
+    const cart = await buildCart(req.body?.lines, { platform });
+    // Advisory coupon preview: validated, never reserved here.
+    let couponPreview = null;
+    if (req.body?.couponCode) {
+      const user = await getUserFromRequest(req);
+      try {
+        const v = await validateCoupon({
+          code: req.body.couponCode,
+          subtotal: cart.totals.calculatedTotal,
+          userId: user?.id || null,
+          phone: req.body?.customerPhone
+        });
+        couponPreview = { code: v.coupon.code, discount: v.discount, valid: true };
+      } catch (err) {
+        couponPreview = { code: String(req.body.couponCode), valid: false, reason: err.code };
+      }
+    }
+    res.json({
+      platform,
+      coupon: couponPreview,
+      lines: cart.lines,
+      parts: cart.parts.map((part) => ({
+        subOrderType: part.subOrderType,
+        scheduledFor: part.scheduledFor,
+        itemCount: part.lines.length,
+        subtotalAmount: part.subtotalAmount,
+        taxAmount: part.taxAmount,
+        totalAmount: part.totalAmount
+      })),
+      subscriptions: cart.subscriptionIntents.map((i) => i.subscription),
+      needsShippingAddress: cart.needsShippingAddress,
+      totals: cart.totals
+    });
+  } catch (err) {
+    sendError(res, err, 'Could not price this cart.', 'Cart Quote Error');
+  }
+});
+
+/**
+ * Creates a parent order with one sub-order per fulfilment part, plus any
+ * subscription plans. Counter payment only — online money still goes through
+ * /api/checkout/prepare so the Razorpay claim and signature checks are unchanged.
+ */
+app.post('/api/parent-orders', orderCreateLimiter, async (req, res) => {
+  try {
+    const user = await getUserFromRequest(req);
+    const { lines, notes, deliveryAddress, platform, couponCode } = req.body || {};
+
+    const fields = checkoutCustomerFields(req.body || {}, user);
+    if (!validateCustomerFields(res, user, fields)) return;
+    const { customerName, cleanPhone } = fields;
+
+    const plat = normalizePlatform(platform);
+    const cart = await buildCart(lines, { platform: plat });
+    const address = cart.needsShippingAddress ? normalizeDeliveryAddress(deliveryAddress) : null;
+    if (cart.needsShippingAddress && !address) {
+      return res.status(400).json({
+        error: 'Delivery address is required for deliver-later items.',
+        code: 'NEEDS_DELIVERY_ADDRESS'
+      });
+    }
+
+    // Reserve the coupon BEFORE the order exists. The unique redemption index
+    // decides a concurrent race; the loser never gets a discounted order.
+    let redemption = null;
+    let couponForOrder = null;
+    if (couponCode) {
+      const claimed = await redeemCoupon({
+        code: couponCode,
+        subtotal: cart.totals.calculatedTotal,
+        userId: user?.id || null,
+        phone: cleanPhone
+      });
+      redemption = claimed.redemption;
+      couponForOrder = { couponId: claimed.coupon.id, code: claimed.coupon.code, discount: claimed.discount };
+    }
+
+    let result;
+    try {
+      result = await createParentOrderWithSubOrders({
+        cart,
+        customerName: customerName.slice(0, 60),
+        customerPhone: cleanPhone,
+        notes: notes ? String(notes).trim().slice(0, 250) : '',
+        userId: user?.id || null,
+        platform: plat,
+        source: 'CUSTOMER',
+        paymentMethod: 'counter',
+        paymentStatus: 'unpaid',
+        deliveryAddress: address,
+        coupon: couponForOrder
+      });
+    } catch (err) {
+      // Give the coupon back if the order it was reserved for never happened.
+      await releaseCoupon(redemption?.id).catch(() => {});
+      throw err;
+    }
+
+    auditLog(req, 'parent_order.create', {
+      parentOrderId: result.parent.id,
+      subOrders: result.subOrders.length,
+      subscriptions: result.subscriptions.length
+    });
+
+    res.status(201).json({
+      parentOrder: result.parent,
+      subOrders: result.subOrders.map(publicOrder),
+      subscriptions: result.subscriptions,
+      // Access tokens are returned once, to the creator only.
+      orderTokens: result.subOrders.map((o) => ({ id: o.id, accessToken: o.accessToken }))
+    });
+  } catch (err) {
+    sendError(res, err, 'Could not create the order.', 'Parent Order Error');
+  }
+});
+
+/** Admin view of a parent order and everything hanging off it. */
+app.get('/api/parent-orders/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const parent = await dbGetParentOrderById(req.params.id);
+    if (!parent) return res.status(404).json({ error: 'Order not found.' });
+    const all = await dbGetOrders({ limit: MAX_ORDER_LIMIT });
+    const subOrders = all.filter((o) => o.parentOrderId === parent.id);
+    const items = await dbGetOrderItemsBySubOrderIds(subOrders.map((o) => o.id));
+    res.json({
+      parentOrder: parent,
+      subOrders: subOrders.map(publicOrder),
+      items
+    });
+  } catch (err) {
+    sendError(res, err, 'Could not load the order.', 'Parent Order Fetch Error');
+  }
+});
+
+/** Plan quote without committing — used by the plan builder. */
+app.post('/api/subscriptions/quote', generalLimiter, async (req, res) => {
+  try {
+    const { productId, frequency, durationMonths } = req.body || {};
+    const products = await dbGetProducts();
+    const product = products.find((p) => p.id === productId);
+    if (!product) return res.status(404).json({ error: 'Product not found.' });
+    if (!product.subscribable) {
+      return res.status(400).json({ error: 'This product cannot be bought on a plan.', code: 'NOT_SUBSCRIBABLE' });
+    }
+    const quote = quoteSubscription({
+      unitPrice: product.price,
+      gstRate: product.gstRate,
+      frequency,
+      durationMonths
+    });
+    res.json({ productId: product.id, productName: product.name, ...quote });
+  } catch (err) {
+    sendError(res, err, 'Could not price this plan.', 'Subscription Quote Error');
+  }
+});
+
+/** A signed-in customer's own plans, with their schedule and wallet balance. */
+app.get('/api/me/subscriptions', authenticateUser, async (req, res) => {
+  try {
+    const subs = await dbGetSubscriptionsByUserId(req.user.id);
+    const detailed = await Promise.all(
+      subs.map(async (sub) => ({
+        ...sub,
+        walletBalance: sub.walletId ? await dbGetWalletBalance(sub.walletId) : 0,
+        deliveries: await dbGetSubscriptionDeliveries(sub.id)
+      }))
+    );
+    res.json(detailed);
+  } catch (err) {
+    sendError(res, err, 'Could not load your plans.', 'My Subscriptions Error');
+  }
+});
+
+// ----------------- ADMIN: CUSTOMER HISTORY & ORDERS ON BEHALF -----------------
+
+/**
+ * Complete historical record for one customer: every order ever placed with its
+ * sub-orders, items, money, payment, plus plans and wallet ledgers. Not limited
+ * to active orders.
+ */
+app.get('/api/admin/customers/history', authenticateAdmin, async (req, res) => {
+  try {
+    const history = await getCustomerHistory({
+      userId: req.query.userId ? String(req.query.userId) : null,
+      phone: req.query.phone ? String(req.query.phone) : null
+    });
+    auditLog(req, 'customer.history.read', {
+      userId: req.query.userId || null,
+      orders: history.totals.orderCount
+    });
+    res.json(history);
+  } catch (err) {
+    sendError(res, err, 'Could not load the customer history.', 'Customer History Error');
+  }
+});
+
+/**
+ * Creates an order on behalf of a customer.
+ *
+ * The admin supplies the agreed FINAL price; the discount is derived from the
+ * server's own calculated total, so the two can never disagree and an admin can
+ * never type a discount that does not match the arithmetic.
+ */
+app.post('/api/admin/orders', authenticateAdmin, async (req, res) => {
+  try {
+    const {
+      lines, customerName, customerPhone, userId, notes,
+      deliveryAddress, platform, negotiatedTotal, negotiationReason, couponCode
+    } = req.body || {};
+
+    const name = String(customerName || '').trim();
+    if (name.length < 2 || name.length > 60) {
+      return res.status(400).json({ error: 'A customer name of 2-60 characters is required.' });
+    }
+    const { cleanPhone, digitsOnly } = cleanPhoneNumber(customerPhone);
+    if (digitsOnly.length < 8 || digitsOnly.length > 18) {
+      return res.status(400).json({ error: 'A valid customer phone number (8-18 digits) is required.' });
+    }
+
+    const plat = normalizePlatform(platform || 'ADMIN');
+    const cart = await buildCart(lines, { platform: plat });
+
+    const address = cart.needsShippingAddress ? normalizeDeliveryAddress(deliveryAddress) : null;
+    if (cart.needsShippingAddress && !address) {
+      return res.status(400).json({
+        error: 'Delivery address is required for deliver-later items.',
+        code: 'NEEDS_DELIVERY_ADDRESS'
+      });
+    }
+
+    // Coupon first, so the negotiated price is judged against the real total.
+    let redemption = null;
+    let couponForOrder = null;
+    if (couponCode) {
+      const claimed = await redeemCoupon({
+        code: couponCode,
+        subtotal: cart.totals.calculatedTotal,
+        userId: userId || null,
+        phone: cleanPhone
+      });
+      redemption = claimed.redemption;
+      couponForOrder = { couponId: claimed.coupon.id, code: claimed.coupon.code, discount: claimed.discount };
+    }
+
+    const afterCoupon = roundMoney(
+      Math.max(0, cart.totals.calculatedTotal - (couponForOrder?.discount || 0))
+    );
+
+    let negotiation;
+    try {
+      negotiation = resolveNegotiation(afterCoupon, negotiatedTotal);
+    } catch (err) {
+      await releaseCoupon(redemption?.id).catch(() => {});
+      throw err;
+    }
+
+    let result;
+    try {
+      result = await createParentOrderWithSubOrders({
+        cart,
+        customerName: name.slice(0, 60),
+        customerPhone: cleanPhone,
+        notes: [
+          notes ? String(notes).trim() : '',
+          negotiation.negotiatedTotal != null
+            ? `Negotiated ${negotiation.negotiatedTotal} vs ${afterCoupon} (-${negotiation.negotiatedDiscount})`
+            : '',
+          negotiationReason ? `Reason: ${String(negotiationReason).trim()}` : ''
+        ].filter(Boolean).join(' · ').slice(0, 250),
+        userId: userId || null,
+        platform: plat,
+        source: 'ADMIN',
+        paymentMethod: 'counter',
+        paymentStatus: 'unpaid',
+        deliveryAddress: address,
+        coupon: couponForOrder,
+        negotiatedTotal: negotiation.negotiatedTotal,
+        createdByAdmin: req.adminFingerprint,
+        parentOrderId: newAdminOrderId()
+      });
+    } catch (err) {
+      await releaseCoupon(redemption?.id).catch(() => {});
+      throw err;
+    }
+
+    auditLog(req, 'admin_order.create', {
+      parentOrderId: result.parent.id,
+      calculatedTotal: result.parent.calculatedTotal,
+      negotiatedTotal: negotiation.negotiatedTotal,
+      negotiatedDiscount: negotiation.negotiatedDiscount,
+      subOrders: result.subOrders.length,
+      reason: negotiationReason ? String(negotiationReason).slice(0, 120) : null
+    });
+
+    res.status(201).json({
+      parentOrder: result.parent,
+      subOrders: result.subOrders.map(publicOrder),
+      subscriptions: result.subscriptions,
+      negotiation
+    });
+  } catch (err) {
+    sendError(res, err, 'Could not create the order.', 'Admin Order Error');
+  }
+});
+
+// ----------------- COUPONS, REFERRALS & PLATFORM PRICING -----------------
+
+app.post('/api/coupons', authenticateAdmin, async (req, res) => {
+  try {
+    const coupon = await createCoupon(req.body || {}, req.adminFingerprint || 'admin');
+    if (coupon.scope === 'COHORT' && Array.isArray(req.body?.cohortUserIds)) {
+      await dbAddCouponCohortMembers(coupon.id, req.body.cohortUserIds.slice(0, 5000));
+    }
+    auditLog(req, 'coupon.create', { couponId: coupon.id, code: coupon.code, scope: coupon.scope });
+    res.status(201).json(coupon);
+  } catch (err) {
+    sendError(res, err, 'Could not create the coupon.', 'Coupon Create Error');
+  }
+});
+
+app.get('/api/coupons', authenticateAdmin, async (req, res) => {
+  try {
+    res.json(await dbGetCoupons());
+  } catch (err) {
+    sendError(res, err, 'Could not load coupons.', 'Coupon List Error');
+  }
+});
+
+/** Advisory validation for the checkout screen; reserves nothing. */
+app.post('/api/coupons/validate', generalLimiter, async (req, res) => {
+  try {
+    const user = await getUserFromRequest(req);
+    const { coupon, discount } = await validateCoupon({
+      code: req.body?.code,
+      subtotal: Number(req.body?.subtotal) || 0,
+      userId: user?.id || null,
+      phone: req.body?.phone
+    });
+    res.json({ valid: true, code: coupon.code, discountType: coupon.discountType, discount });
+  } catch (err) {
+    if (err.code && err.status === 400) {
+      return res.status(200).json({ valid: false, reason: err.code, message: err.message });
+    }
+    sendError(res, err, 'Could not check that coupon.', 'Coupon Validate Error');
+  }
+});
+
+app.post('/api/platform-price-rules', authenticateAdmin, async (req, res) => {
+  try {
+    const { platform, scope, scopeRef, adjustmentType, adjustmentValue, effectiveTo } = req.body || {};
+    if (!PLATFORMS.includes(platform)) {
+      return res.status(400).json({ error: `Platform must be one of: ${PLATFORMS.join(', ')}` });
+    }
+    if (!['PERCENT', 'FLAT'].includes(adjustmentType)) {
+      return res.status(400).json({ error: 'Adjustment type must be PERCENT or FLAT.' });
+    }
+    const value = Number(adjustmentValue);
+    if (!Number.isFinite(value)) return res.status(400).json({ error: 'Adjustment value must be numeric.' });
+
+    const rule = await dbCreatePlatformPriceRule({
+      id: `ppr-${crypto.randomUUID()}`,
+      platform,
+      scope: ['GLOBAL', 'CATEGORY', 'PRODUCT'].includes(scope) ? scope : 'GLOBAL',
+      scopeRef: scopeRef || null,
+      adjustmentType,
+      adjustmentValue: value,
+      effectiveFrom: new Date().toISOString(),
+      effectiveTo: effectiveTo || null,
+      isActive: true,
+      createdAt: new Date().toISOString()
+    });
+    auditLog(req, 'pricing.rule.create', { ruleId: rule.id, platform, scope: rule.scope });
+    res.status(201).json(rule);
+  } catch (err) {
+    sendError(res, err, 'Could not create the pricing rule.', 'Pricing Rule Error');
+  }
+});
+
+app.get('/api/platform-price-rules', authenticateAdmin, async (req, res) => {
+  try {
+    res.json(await dbGetPlatformPriceRules());
+  } catch (err) {
+    sendError(res, err, 'Could not load pricing rules.', 'Pricing Rule List Error');
+  }
+});
+
+/** Bonus amounts are configuration, not code: a new rule supersedes the old. */
+app.post('/api/referral-rules', authenticateAdmin, async (req, res) => {
+  try {
+    const { referrerAmount, referredAmount, qualifyingEvent, minOrderAmount } = req.body || {};
+    const rule = await dbCreateReferralRule({
+      id: `rrl-${crypto.randomUUID()}`,
+      referrerAmount: Math.max(0, Number(referrerAmount) || 0),
+      referredAmount: Math.max(0, Number(referredAmount) || 0),
+      qualifyingEvent: qualifyingEvent || 'FIRST_ORDER_PAID',
+      minOrderAmount: Math.max(0, Number(minOrderAmount) || 0),
+      effectiveFrom: new Date().toISOString(),
+      effectiveTo: null,
+      isActive: true
+    });
+    auditLog(req, 'referral.rule.create', { ruleId: rule.id });
+    res.status(201).json(rule);
+  } catch (err) {
+    sendError(res, err, 'Could not create the referral rule.', 'Referral Rule Error');
+  }
+});
+
+app.get('/api/referral-rules/active', authenticateAdmin, async (req, res) => {
+  try {
+    res.json(await activeRule());
+  } catch (err) {
+    sendError(res, err, 'Could not load the referral rule.', 'Referral Rule Error');
+  }
+});
+
+/** The signed-in customer's own code and progress. */
+app.get('/api/me/referrals', authenticateUser, async (req, res) => {
+  try {
+    await getOrCreateCode(req.user.id, req.user.username);
+    res.json(await referralSummary(req.user.id));
+  } catch (err) {
+    sendError(res, err, 'Could not load your referrals.', 'Referral Summary Error');
+  }
+});
+
+/** Admin trigger for the qualifying event, until it is wired to payment capture. */
+app.post('/api/referrals/qualify', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await qualifyAndReward({
+      referredUserId: String(req.body?.referredUserId || ''),
+      parentOrderId: req.body?.parentOrderId || null,
+      orderAmount: Number(req.body?.orderAmount) || 0
+    });
+    auditLog(req, 'referral.qualify', {
+      referredUserId: req.body?.referredUserId, rewarded: result.rewarded, reason: result.reason || null
+    });
+    res.json(result);
+  } catch (err) {
+    sendError(res, err, 'Could not process the referral.', 'Referral Qualify Error');
+  }
+});
+
+// ----------------- SCHEDULED JOBS -----------------
+
+/**
+ * Subscription delivery runner, for Cloud Scheduler (or any external cron).
+ *
+ * Authenticated by SCHEDULER_SECRET rather than an admin session, because a
+ * scheduler has no session to present. Without the variable set the endpoint is
+ * disabled outright — it never falls open.
+ *
+ * Safe to run from several instances at once: every delivery is taken with a
+ * conditional UPDATE, so concurrent callers cannot both process the same one.
+ * Safe to retry: the wallet debit is keyed on the delivery id.
+ */
+app.post('/api/jobs/run-due-deliveries', async (req, res) => {
+  try {
+    const secret = process.env.SCHEDULER_SECRET || '';
+    if (!secret) {
+      return res.status(503).json({ error: 'Scheduler is not configured.', code: 'SCHEDULER_DISABLED' });
+    }
+    const supplied = String(req.headers['x-scheduler-secret'] || '');
+    if (!supplied || !timingSafeCompare(supplied, secret)) {
+      return res.status(401).json({ error: 'Unauthorized.' });
+    }
+
+    const body = Buffer.isBuffer(req.body) ? {} : (req.body || {});
+    const started = Date.now();
+    const result = await runDueDeliveries({
+      onDate: body.onDate ? String(body.onDate).slice(0, 10) : undefined,
+      limit: Math.min(500, Math.max(1, parseInt(body.limit, 10) || 200))
+    });
+    console.log(JSON.stringify({
+      audit: 'scheduler.run_due',
+      at: new Date().toISOString(),
+      ms: Date.now() - started,
+      attempted: result.attempted,
+      generated: result.generated,
+      skipped: result.skipped,
+      failed: result.failed
+    }));
+    res.json(result);
+  } catch (err) {
+    sendError(res, err, 'Scheduler run failed.', 'Scheduler Error');
+  }
+});
+
+// ----------------- SUBSCRIPTION RUNTIME & WALLET -----------------
+
+/**
+ * Generates every planned delivery whose date has arrived. Idempotent: each
+ * delivery is claimed with a conditional update, so running this twice (or from
+ * two workers) produces one sub-order per delivery.
+ */
+app.post('/api/subscriptions/run-due', authenticateAdmin, async (req, res) => {
+  try {
+    const { onDate, limit } = req.body || {};
+    const result = await runDueDeliveries({
+      onDate: onDate ? String(onDate).slice(0, 10) : undefined,
+      limit: Math.min(500, Math.max(1, parseInt(limit, 10) || 200))
+    });
+    auditLog(req, 'subscription.run_due', {
+      attempted: result.attempted, generated: result.generated, failed: result.failed
+    });
+    res.json(result);
+  } catch (err) {
+    sendError(res, err, 'Could not run subscription deliveries.', 'Subscription Run Error');
+  }
+});
+
+/** Runs one delivery now — used by staff to pull a delivery forward. */
+app.post('/api/subscriptions/deliveries/:id/run', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await runSubscriptionDelivery(req.params.id, { force: Boolean(req.body?.force) });
+    auditLog(req, 'subscription.delivery.run', { deliveryId: req.params.id, ran: result.ran });
+    res.json(result);
+  } catch (err) {
+    sendError(res, err, 'Could not run this delivery.', 'Delivery Run Error');
+  }
+});
+
+/** Marks a generated delivery failed and returns its money to the plan wallet. */
+app.post('/api/subscriptions/deliveries/:id/fail', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await failDelivery(req.params.id, String(req.body?.reason || '').slice(0, 200));
+    auditLog(req, 'subscription.delivery.fail', { deliveryId: req.params.id, changed: result.changed });
+    res.json(result);
+  } catch (err) {
+    sendError(res, err, 'Could not fail this delivery.', 'Delivery Fail Error');
+  }
+});
+
+/** Skips a planned delivery. Never debited, so nothing to reverse. */
+app.post('/api/subscriptions/deliveries/:id/skip', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await skipDelivery(req.params.id);
+    auditLog(req, 'subscription.delivery.skip', { deliveryId: req.params.id, changed: result.changed });
+    res.json(result);
+  } catch (err) {
+    sendError(res, err, 'Could not skip this delivery.', 'Delivery Skip Error');
+  }
+});
+
+app.patch('/api/subscriptions/:id/status', authenticateAdmin, async (req, res) => {
+  try {
+    const updated = await setSubscriptionStatus(req.params.id, String(req.body?.status || ''));
+    auditLog(req, 'subscription.status', { subscriptionId: req.params.id, to: updated.status });
+    res.json(updated);
+  } catch (err) {
+    sendError(res, err, 'Could not update this plan.', 'Subscription Status Error');
+  }
+});
+
+app.get('/api/subscriptions/:id', authenticateAdmin, async (req, res) => {
+  try {
+    res.json(await getSubscriptionDetail(req.params.id));
+  } catch (err) {
+    sendError(res, err, 'Could not load this plan.', 'Subscription Detail Error');
+  }
+});
+
+/** Full auditable statement: every ledger row plus the derived balance. */
+app.get('/api/wallets/:id/statement', authenticateAdmin, async (req, res) => {
+  try {
+    res.json(await getStatement(req.params.id));
+  } catch (err) {
+    sendError(res, err, 'Could not load the wallet.', 'Wallet Statement Error');
+  }
+});
+
+/**
+ * Manual correction. Signed amount: negative debits. Always attributed and
+ * reasoned — there is no withdrawal endpoint, only ledger entries.
+ */
+app.post('/api/wallets/:id/adjust', authenticateAdmin, async (req, res) => {
+  try {
+    const { amount, reason, reference } = req.body || {};
+    const result = await adjust({
+      walletId: req.params.id,
+      amount: Number(amount),
+      reason: String(reason || ''),
+      reference,
+      createdByAdmin: req.adminFingerprint || 'admin'
+    });
+    auditLog(req, 'wallet.adjust', {
+      walletId: req.params.id, amount: Number(amount), duplicate: result.duplicate
+    });
+    res.json(result);
+  } catch (err) {
+    sendError(res, err, 'Could not adjust the wallet.', 'Wallet Adjust Error');
+  }
+});
+
+/**
+ * Marks an unpaid plan funded. Used by the counter flow once cash is taken; the
+ * credit is keyed on the subscription so calling it twice credits once.
+ */
+app.post('/api/subscriptions/:id/mark-paid', authenticateAdmin, async (req, res) => {
+  try {
+    const { subscription } = await getSubscriptionDetail(req.params.id);
+    if (subscription.status === 'CANCELLED') {
+      return res.status(400).json({ error: 'This plan is cancelled.', code: 'SUBSCRIPTION_CANCELLED' });
+    }
+    const result = await creditSubscriptionFunding({
+      walletId: subscription.walletId,
+      subscriptionId: subscription.id,
+      amount: subscription.totalAmount,
+      parentOrderId: subscription.parentOrderId
+    });
+    if (subscription.status === 'PENDING_PAYMENT') {
+      await setSubscriptionStatus(subscription.id, 'ACTIVE');
+    }
+    auditLog(req, 'subscription.mark_paid', {
+      subscriptionId: subscription.id, duplicate: result.duplicate
+    });
+    res.json({ ...result, subscription: await getSubscriptionDetail(subscription.id) });
+  } catch (err) {
+    sendError(res, err, 'Could not mark this plan paid.', 'Subscription Mark Paid Error');
   }
 });
 
@@ -1029,12 +1851,19 @@ app.patch('/api/orders/:id/status', authenticateAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Order not found.' });
     }
 
-    const kitchenStatuses = ['pending', 'preparing', 'ready', 'completed', 'cancelled'];
-    const deliveryStatuses = ['pending', 'shipped', 'delivered', 'rejected', 'refunded', 'cancelled'];
-    const validStatuses = existing.fulfillmentType === 'delivery' ? deliveryStatuses : kitchenStatuses;
-
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+    // Only orders created under the parent/sub-order model follow the per-type
+    // machines. A row with no parent predates it, so it keeps the flat legacy
+    // vocabulary it was created with — sub_order_type is backfilled for
+    // reporting and must not retroactively change how an old order behaves.
+    const machineKey = existing.parentOrderId
+      ? existing.subOrderType
+      : existing.fulfillmentType === 'delivery'
+        ? 'delivery'
+        : 'immediate';
+    try {
+      assertTransition(machineKey, existing.status, status);
+    } catch (err) {
+      return res.status(err.status || 400).json({ error: err.message, code: err.code });
     }
 
     const updates = { status };
@@ -1172,7 +2001,10 @@ app.post('/api/webhooks/razorpay', async (req, res) => {
       return res.status(400).json({ error: 'Invalid webhook payload.' });
     }
 
-    const result = await handleRazorpayWebhookEvent(event);
+    // Razorpay's own event id is the de-duplication key for redeliveries.
+    const result = await handleRazorpayWebhookEvent(event, {
+      eventId: String(req.headers['x-razorpay-event-id'] || '')
+    });
     // A non-2xx makes Razorpay redeliver, which is what we want while another worker
     // holds the fulfilment lock.
     res.status(result.retry ? 503 : 200).json({ ok: !result.retry, ...result });

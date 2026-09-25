@@ -352,7 +352,25 @@ async function runSecurityTests() {
   });
   assert.strictEqual(replayRes.status, 200);
   const replayBody = await replayRes.json();
-  assert.ok(replayBody.alreadyCompleted || replayBody.orderCount === capturedBody.orderCount);
+  // A redelivery is now rejected at the event journal before fulfilment is even
+  // entered, so it reports duplicate_event rather than re-running and reporting
+  // alreadyCompleted. Either is idempotent; assert the invariant that actually
+  // matters — the replay created no extra orders for this payment.
+  assert.ok(
+    replayBody.reason === 'duplicate_event' ||
+      replayBody.alreadyCompleted ||
+      replayBody.orderCount === capturedBody.orderCount,
+    `replay must be idempotent, got ${JSON.stringify(replayBody)}`
+  );
+  const ordersAfterReplay = await fetch(`${BASE_URL}/api/orders`, {
+    headers: { 'x-admin-token': ADMIN_TOKEN }
+  }).then((r) => r.json());
+  const forThisPayment = ordersAfterReplay.filter((o) => o.razorpayPaymentId === payId);
+  assert.strictEqual(
+    forThisPayment.length,
+    capturedBody.orderCount,
+    `a replayed webhook must not create extra orders (${forThisPayment.length} vs ${capturedBody.orderCount})`
+  );
 
   const refundPayload = {
     event: 'refund.processed',
